@@ -34,7 +34,9 @@ It writes the following to `data/processed/`:
 - `instruments.csv`: one row per instrument, with day and bar counts and the date range.
 - `manifest.csv`: one row per input file, with its status, quality stats and any error.
 
-Expected result: 27 forward instruments and 159 errors. The errors are all the SPOT files, which the loader can't read yet because they have no forward-point columns.
+Expected result: 30 instruments (27 forward, 3 spot) and 0 errors. Spot files have no forward-point columns, so the loader fills `close_mid_fp = 0` and `close_mid_all_in = close_mid`.
+
+Use `--product forward` or `--product spot` (`-p`) to load only one kind. From Python: `load_all(paths, product="spot")`.
 
 ## Use it from Python
 
