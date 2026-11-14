@@ -61,6 +61,7 @@ export default function FxGlobe() {
   const colors = useMemo(
     () => ({
       accent: cssVar('--color-accent', '#7c9cff'),
+      accentBright: cssVar('--color-accent-bright', '#b4c6ff'),
       ink: cssVar('--color-ink', '#e6ebf5'),
       nodata: cssVar('--color-nodata', '#334155'),
     }),
@@ -150,7 +151,7 @@ export default function FxGlobe() {
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
       const lit = ZONE_BY_COUNTRY.has(code)
-      if (lit) return withAlpha(colors.accent, isActive(code) ? 0.85 : 0.45)
+      if (lit) return withAlpha(isActive(code) ? colors.accentBright : colors.accent, isActive(code) ? 1 : 0.8)
       return withAlpha(colors.nodata, isActive(code) ? 0.75 : 0.35)
     },
     [colors, isActive],
@@ -159,7 +160,7 @@ export default function FxGlobe() {
   const sideColor = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
-      return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.accent, 0.25) : withAlpha(colors.nodata, 0.15)
+      return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.accent, 0.6) : withAlpha(colors.nodata, 0.15)
     },
     [colors],
   )
@@ -167,7 +168,8 @@ export default function FxGlobe() {
   const strokeColor = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
-      return code === selectedCode ? colors.ink : withAlpha(colors.ink, 0.12)
+      if (code === selectedCode) return colors.ink
+      return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.accentBright, 0.9) : withAlpha(colors.ink, 0.12)
     },
     [colors, selectedCode],
   )
@@ -175,9 +177,9 @@ export default function FxGlobe() {
   const altitude = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
-      if (code === selectedCode) return 0.03
-      if (isActive(code)) return 0.02
-      return ZONE_BY_COUNTRY.has(code) ? 0.012 : 0.006
+      if (code === selectedCode) return 0.04
+      if (isActive(code)) return 0.03
+      return ZONE_BY_COUNTRY.has(code) ? 0.018 : 0.006
     },
     [selectedCode, isActive],
   )
@@ -248,9 +250,9 @@ export default function FxGlobe() {
         pointsData={singaporeData}
         pointLat="lat"
         pointLng="lng"
-        pointColor={() => colors.accent}
+        pointColor={() => colors.accentBright}
         pointAltitude={(obj: object) => (isActive((obj as SingaporeMarker).code) ? 0.05 : 0.025)}
-        pointRadius={0.9}
+        pointRadius={1.1}
         pointLabel={(obj: object) => tooltipHtml((obj as SingaporeMarker).name, ZONE_BY_COUNTRY.get('SGP') ?? null)}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}

@@ -1,9 +1,10 @@
 /**
- * Layout: the globe fills the screen; small panels sit in the corners so it stays visible.
+ * Layout: the globe fills the screen; small panels sit at the edges so it stays visible.
  * Steps 5–7 add the forecast panel, execution strip and replay controls.
  */
 import FxGlobe from './components/globe/FxGlobe'
 import ConvertCard from './components/convert/ConvertCard'
+import RatesTicker from './components/layout/RatesTicker'
 import StormLegend from './components/layout/StormLegend'
 
 export default function App() {
@@ -12,23 +13,18 @@ export default function App() {
       {/* Globe layer (full screen, behind everything) */}
       <FxGlobe />
 
-      {/* Top-left: title. Top-right: last updated. Small pills, not a full-width bar */}
-      <header className="pointer-events-none absolute top-4 left-4 right-4 flex items-start justify-between gap-4">
-        <h1 className="glass pointer-events-auto px-4 py-2 font-display text-lg font-semibold tracking-tight">
-          FX Forecast <span className="text-ink-muted font-normal">· next 60 min outlook</span>
-        </h1>
-        <p className="glass pointer-events-auto px-4 py-2 text-sm text-ink-muted">
-          Last updated <span className="num text-ink">14:32</span>
-        </p>
+      {/* Top: thin rates "conveyor belt" with a small brand */}
+      <header className="absolute top-3 left-3 right-3">
+        <RatesTicker />
       </header>
 
       {/* Bottom-left: convert card */}
-      <div className="absolute bottom-4 left-4">
+      <div className="absolute bottom-3 left-3">
         <ConvertCard />
       </div>
 
-      {/* Bottom-right: storm scale key */}
-      <div className="absolute bottom-4 right-4 hidden sm:block">
+      {/* Bottom-right: volatility key */}
+      <div className="absolute bottom-3 right-3 hidden sm:block">
         <StormLegend />
       </div>
     </div>

@@ -36,14 +36,14 @@ function CurrencySelect({
 }) {
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-1">
-      <label htmlFor={id} className="text-ink-muted text-xs uppercase tracking-wide">
+      <label htmlFor={id} className="text-ink-muted text-[10px] uppercase tracking-wider">
         {label}
       </label>
       <select
         id={id}
         value={value}
         onChange={(e: ChangeEvent<HTMLSelectElement>) => onChange(e.target.value)}
-        className="h-11 w-full cursor-pointer rounded-xl border border-panel-border bg-white/5 px-3 font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="h-9 w-full cursor-pointer rounded-lg border border-panel-border bg-white/5 px-2.5 text-sm font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
         {ZONES.map((z) => (
           <option key={z.code} value={z.code} title={z.name} className="bg-space">
@@ -69,9 +69,9 @@ export default function ConvertCard() {
   const [draft, setDraft] = useState(() => formatAmount(amount))
 
   return (
-    <section aria-label="Convert" className="glass w-[min(340px,calc(100vw-2rem))] space-y-3 p-4">
+    <section aria-label="Convert" className="glass w-[min(280px,calc(100vw-2rem))] space-y-2.5 p-3">
       <div className="flex flex-col gap-1">
-        <label htmlFor="amount" className="text-ink-muted text-xs uppercase tracking-wide">
+        <label htmlFor="amount" className="text-ink-muted text-[10px] uppercase tracking-wider">
           Amount
         </label>
         <input
@@ -86,7 +86,7 @@ export default function ConvertCard() {
             setAmount(parseAmount(text))
           }}
           onBlur={() => setDraft(formatAmount(amount))}
-          className="num h-12 w-full rounded-xl border border-panel-border bg-white/5 px-3 text-2xl text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          className="num h-10 w-full rounded-lg border border-panel-border bg-white/5 px-2.5 text-lg text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
         />
       </div>
 
@@ -97,14 +97,14 @@ export default function ConvertCard() {
           onClick={swap}
           aria-label={`Swap: convert ${quote} to ${base} instead`}
           title="Swap currencies"
-          className="mb-0.5 grid size-10 shrink-0 cursor-pointer place-items-center rounded-full border border-panel-border text-accent transition hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-accent outline-none"
+          className="grid size-9 shrink-0 cursor-pointer place-items-center rounded-full border border-panel-border text-accent transition hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-accent outline-none"
         >
           <ArrowLeftRight className="size-4" aria-hidden />
         </button>
         <CurrencySelect id="to" label="To" value={quote} onChange={setQuote} />
       </div>
 
-      <p className="text-ink-muted flex items-center gap-1.5 text-xs" aria-live="polite">
+      <p className="text-ink-muted flex items-center gap-1.5 text-[11px]" aria-live="polite">
         <MapPin className="size-3.5 shrink-0" aria-hidden />
         {selected
           ? selected.zone

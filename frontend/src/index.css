@@ -18,6 +18,7 @@
 
   /* Interactive accent */
   --color-accent: #7c9cff;
+  --color-accent-bright: #b4c6ff; /* highlighted countries on the globe */
 
   /* Storm scale — always pair with an icon + word (colour-blind safe) */
   --color-calm: #2dd4bf;       /* teal  + sun        */
@@ -29,6 +30,13 @@
   --font-display: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
   --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /* Rates ticker: the list is drawn twice and slides left by half its width, so it loops seamlessly */
+  --animate-ticker: ticker 45s linear infinite;
+  @keyframes ticker {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
 }
 
 @layer base {
