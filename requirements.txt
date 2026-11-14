@@ -1,4 +1,6 @@
 pandas>=1.5
 numpy
 pyarrow
+xgboost>=2.0
+scikit-learn
 pytest>=7
