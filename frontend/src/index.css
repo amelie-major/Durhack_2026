@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------
+   Design tokens — "night side of the Earth from orbit"
+   Use as Tailwind utilities: bg-space, text-ink-muted, text-calm, etc.
+   ------------------------------------------------------------------ */
+@theme {
+  /* Surfaces */
+  --color-space: #050811;          /* page background */
+  --color-panel: rgb(13 19 36 / 0.72); /* frosted glass panels */
+  --color-panel-border: rgb(148 163 184 / 0.14);
+
+  /* Text */
+  --color-ink: #e6ebf5;
+  --color-ink-muted: #8b96ad;
+  --color-ink-faint: #56607a;
+
+  /* Interactive accent */
+  --color-accent: #7c9cff;
+
+  /* Storm scale — always pair with an icon + word (colour-blind safe) */
+  --color-calm: #2dd4bf;       /* teal  + sun        */
+  --color-unsettled: #fbbf24;  /* amber + cloud      */
+  --color-storm: #f43f8e;      /* magenta + lightning */
+  --color-nodata: #334155;
+
+  /* Type */
+  --font-display: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-space text-ink font-sans antialiased;
+    overflow: hidden;
+  }
+}
+
+/* Frosted-glass panel used everywhere over the globe */
+@utility glass {
+  background: var(--color-panel);
+  border: 1px solid var(--color-panel-border);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-radius: 1rem;
+  box-shadow: 0 10px 40px rgb(0 0 0 / 0.35);
+}
+
+/* Numbers that don't jitter while ticking */
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
