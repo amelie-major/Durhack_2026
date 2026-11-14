@@ -1,8 +1,10 @@
 /**
- * Step 1 shell: themed layout with placeholder regions.
- * Step 2 replaces the globe placeholder with <FxGlobe />.
+ * Step 2 shell: real globe behind placeholder panels.
+ * Steps 3–7 replace the placeholders one by one.
  */
+import { useCallback, useState } from 'react'
 import { CloudLightning, CloudSun, Sun } from 'lucide-react'
+import FxGlobe, { type GlobeSelection } from './components/globe/FxGlobe'
 
 const levels = [
   { name: 'Calm', Icon: Sun, cls: 'text-calm' },
@@ -11,12 +13,13 @@ const levels = [
 ]
 
 export default function App() {
+  const [selection, setSelection] = useState<GlobeSelection | null>(null)
+  const handleSelect = useCallback((s: GlobeSelection | null) => setSelection(s), [])
+
   return (
     <div className="relative h-full w-full">
       {/* Globe layer (full screen, behind everything) */}
-      <div className="absolute inset-0 grid place-items-center">
-        <div className="size-[min(70vh,70vw)] rounded-full bg-[radial-gradient(circle_at_35%_30%,#1b2a52,#050811_70%)] shadow-[0_0_120px_#1e3a8a55]" />
-      </div>
+      <FxGlobe selectedCode={selection?.code ?? null} onSelect={handleSelect} />
 
       {/* Top bar */}
       <header className="glass absolute top-4 left-4 right-4 flex items-center justify-between px-5 py-3">
@@ -35,9 +38,21 @@ export default function App() {
         <p className="text-ink-muted text-sm mt-1">GBP → JPY · step 4</p>
       </section>
 
-      {/* Right: forecast panel placeholder — shows the storm scale tokens */}
-      <section className="glass absolute top-24 right-4 w-80 p-5 space-y-3">
-        <h2 className="font-display text-lg">Storm scale</h2>
+      {/* Right: forecast panel placeholder — shows the globe selection + storm scale tokens */}
+      <section className="glass absolute top-24 right-4 w-80 p-5 space-y-3" aria-live="polite">
+        <h2 className="font-display text-lg">Selected</h2>
+        {selection ? (
+          <p>
+            <span className="font-medium">{selection.name}</span>{' '}
+            <span className="text-ink-muted">
+              · {selection.zone ? selection.zone.code : 'No forecast'}
+            </span>
+          </p>
+        ) : (
+          <p className="text-ink-muted text-sm">Click a country on the globe (Esc to clear)</p>
+        )}
+
+        <h2 className="font-display text-lg pt-2">Storm scale</h2>
         {levels.map(({ name, Icon, cls }) => (
           <div key={name} className={`flex items-center gap-3 ${cls}`}>
             <Icon className="size-5" aria-hidden />

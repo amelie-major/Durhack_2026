@@ -3,8 +3,9 @@
 /* ------------------------------------------------------------------
    Design tokens — "night side of the Earth from orbit"
    Use as Tailwind utilities: bg-space, text-ink-muted, text-calm, etc.
+   `static` makes Tailwind emit every token, so JS (the globe) can read them.
    ------------------------------------------------------------------ */
-@theme {
+@theme static {
   /* Surfaces */
   --color-space: #050811;          /* page background */
   --color-panel: rgb(13 19 36 / 0.72); /* frosted glass panels */
@@ -56,4 +57,31 @@
 @utility num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* Globe hover tooltip (float-tooltip injects its own style later, so `div.` wins on specificity) */
+div.float-tooltip-kap {
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  font: inherit;
+  color: inherit;
+}
+.globe-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-panel-border);
+  border-radius: 0.75rem;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--color-ink);
+}
+.globe-tip span {
+  color: var(--color-ink-muted);
+  font-size: 12px;
 }
