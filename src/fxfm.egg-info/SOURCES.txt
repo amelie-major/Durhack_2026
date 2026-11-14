@@ -1,0 +1,10 @@
+pyproject.toml
+src/fxfm/__init__.py
+src/fxfm.egg-info/PKG-INFO
+src/fxfm.egg-info/SOURCES.txt
+src/fxfm.egg-info/dependency_links.txt
+src/fxfm.egg-info/requires.txt
+src/fxfm.egg-info/top_level.txt
+src/fxfm/data/__init__.py
+src/fxfm/data/loader.py
+tests/test_loader.py
