@@ -27,7 +27,7 @@ Pipeline
 
 Command line
 ------------
-    python loader.py <input dirs, CSVs or zips ...> <output dir>
+    python loader.py [--product all|forward|spot] <input dirs, CSVs or zips ...> <output dir>
 """
 from __future__ import annotations
 
@@ -214,13 +214,29 @@ def _walk_path(path: str) -> Iterator[Tuple[str, Reader]]:
         raise FileNotFoundError(path)
 
 
-def discover(paths: Iterable[str], skipped: Optional[List[Tuple[FileMeta, str]]] = None) -> Iterator[Source]:
+PRODUCTS = ("all", "forward", "spot")
+
+
+def _wanted(meta: FileMeta, product: str) -> bool:
+    """True if `meta` matches the product filter ("all", "forward" or "spot")."""
+    if product == "all":
+        return True
+    is_spot = meta.product == "SPOT"
+    return is_spot if product == "spot" else not is_spot
+
+
+def discover(paths: Iterable[str], skipped: Optional[List[Tuple[FileMeta, str]]] = None,
+             product: str = "all") -> Iterator[Source]:
     """Yield every recognised data file under `paths`, once per (instrument, day).
+
+    `product` limits the result to "forward" or "spot" files ("all" keeps both).
 
     The same day can appear more than once, e.g. inside a zip and also
     extracted next to it. The first copy found is used; later copies are
     appended to `skipped` (if a list is given) as (meta, location).
     """
+    if product not in PRODUCTS:
+        raise ValueError(f"product must be one of {PRODUCTS}, got {product!r}")
     if isinstance(paths, (str, os.PathLike)):
         paths = [paths]
 
@@ -229,8 +245,8 @@ def discover(paths: Iterable[str], skipped: Optional[List[Tuple[FileMeta, str]]]
         for location, reader in _walk_path(os.fspath(path)):
             filename = location.split("!")[-1]
             meta = parse_filename(filename)
-            if meta is None:
-                continue  # not a data file
+            if meta is None or not _wanted(meta, product):
+                continue  # not a data file, or filtered out
 
             key = (meta.instrument_id, meta.date)
             if key in already_seen:
@@ -327,6 +343,22 @@ def _max_abs_mismatch(df: pd.DataFrame, actual: str, expected: Callable[[str], p
     return 0.0 if pd.isna(worst) else float(worst)
 
 
+# Spot has no forward points, so its CSVs omit the _fp and _all_in columns.
+_FP_COLS = ["close_mid_fp", "close_mid_all_in"]
+
+
+def _fill_spot_columns(raw: pd.DataFrame) -> None:
+    """Add the forward-point columns to a spot file, in place.
+
+    Spot settles at the spot date, so forward points are 0 and the all-in
+    price is just the mid. Only applied when *both* columns are absent, so a
+    forward file missing just one of them is still reported as broken.
+    """
+    if all(c not in raw.columns for c in _FP_COLS) and "close_mid" in raw.columns:
+        raw["close_mid_fp"] = 0.0
+        raw["close_mid_all_in"] = raw["close_mid"]
+
+
 def read_day(src, meta: Optional[FileMeta] = None) -> Tuple[pd.DataFrame, dict]:
     """Read and clean one daily CSV.
 
@@ -339,6 +371,7 @@ def read_day(src, meta: Optional[FileMeta] = None) -> Tuple[pd.DataFrame, dict]:
     if isinstance(src, (bytes, bytearray)):
         src = io.BytesIO(src)
     raw = pd.read_csv(src)
+    _fill_spot_columns(raw)
 
     missing_cols = [c for c in KEEP_COLS if c not in raw.columns]
     if missing_cols:
@@ -492,8 +525,10 @@ def _print_summary(series: Dict[str, pd.DataFrame], manifest: pd.DataFrame, n_sk
             print(f"  ERROR {failed['source']}: {failed['error']}", file=sys.stderr)
 
 
-def load_all(paths, verbose: bool = True) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
+def load_all(paths, verbose: bool = True, product: str = "all") -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
     """Load every instrument found under `paths`.
+
+    `product` is "all", "forward" or "spot" (see discover()).
 
     Returns (series, manifest):
       series   {instrument_id: DataFrame of all its bars, with features}
@@ -505,7 +540,7 @@ def load_all(paths, verbose: bool = True) -> Tuple[Dict[str, pd.DataFrame], pd.D
     days_by_instrument: Dict[str, List[pd.DataFrame]] = {}
     meta_by_instrument: Dict[str, FileMeta] = {}
 
-    for src in discover(paths, skipped):
+    for src in discover(paths, skipped, product=product):
         day_df, row = _load_one_file(src)
         manifest_rows.append(row)
         if day_df is not None:
@@ -648,13 +683,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Load raw FX-forward bars and write processed parquet.")
     parser.add_argument("paths", nargs="+", help="input dirs/CSVs/zips ... followed by the output dir")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-p", "--product", choices=PRODUCTS, default="all",
+                        help="which instruments to load (default: all)")
     args = parser.parse_args(argv)
 
     if len(args.paths) < 2:
         parser.error("need at least one input and an output directory")
     *inputs, out_dir = args.paths
 
-    series, manifest = load_all(inputs, verbose=not args.quiet)
+    series, manifest = load_all(inputs, verbose=not args.quiet, product=args.product)
     if not series:
         print("no data found", file=sys.stderr)
         return 1
