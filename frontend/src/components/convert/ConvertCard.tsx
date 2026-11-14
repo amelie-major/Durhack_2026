@@ -9,6 +9,8 @@ import { ZONES } from '../../data/currencies'
 import { useAppStore } from '../../store/useAppStore'
 
 const MAX_AMOUNT = 1_000_000_000
+/** Digits and thousands commas, then optionally a dot and up to 2 decimals. Anything else is ignored. */
+const ALLOWED_INPUT = /^[\d,]*(\.\d{0,2})?$/
 
 function formatAmount(n: number): string {
   return n.toLocaleString('en-GB', { maximumFractionDigits: 2 })
@@ -78,8 +80,10 @@ export default function ConvertCard() {
           autoComplete="off"
           value={draft}
           onChange={(e) => {
-            setDraft(e.target.value)
-            setAmount(parseAmount(e.target.value))
+            const text = e.target.value
+            if (!ALLOWED_INPUT.test(text)) return // letters, spaces, a 2nd dot… are refused
+            setDraft(text)
+            setAmount(parseAmount(text))
           }}
           onBlur={() => setDraft(formatAmount(amount))}
           className="num h-12 w-full rounded-xl border border-panel-border bg-white/5 px-3 text-2xl text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"

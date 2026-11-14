@@ -1,24 +1,20 @@
-/** Small storm-scale key: colour + icon + word, so it never relies on colour alone */
-import { CloudLightning, CloudSun, Sun } from 'lucide-react'
-
-const levels = [
-  { name: 'Calm', Icon: Sun, cls: 'text-calm' },
-  { name: 'Unsettled', Icon: CloudSun, cls: 'text-unsettled' },
-  { name: 'Storm', Icon: CloudLightning, cls: 'text-storm' },
-]
+/** Storm-scale key: weather word + volatility level + icon + colour */
+import { STORM_LEVELS } from '../../lib/storm'
 
 export default function StormLegend() {
   return (
-    <ul aria-label="Storm scale" className="glass flex items-center gap-4 px-4 py-2 text-xs">
-      {levels.map(({ name, Icon, cls }) => (
-        <li key={name} className={`flex items-center gap-1.5 ${cls}`}>
-          <Icon className="size-4" aria-hidden />
-          <span className="font-medium">{name}</span>
+    <ul aria-label="Volatility scale" className="glass flex flex-col gap-1.5 px-4 py-3 text-xs">
+      {STORM_LEVELS.map(({ name, volatility, Icon, textClass }) => (
+        <li key={name} className="flex items-center gap-2">
+          <Icon className={`size-4 ${textClass}`} aria-hidden />
+          <span className={`w-16 font-medium ${textClass}`}>{name}</span>
+          <span className="text-ink-muted">{volatility}</span>
         </li>
       ))}
-      <li className="text-ink-muted flex items-center gap-1.5">
-        <span className="size-3 rounded-sm bg-nodata" aria-hidden />
-        No forecast
+      <li className="text-ink-muted flex items-center gap-2">
+        <span className="mx-0.5 size-3 rounded-sm bg-nodata" aria-hidden />
+        <span className="w-16">No data</span>
+        <span>No forecast here</span>
       </li>
     </ul>
   )
