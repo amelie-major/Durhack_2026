@@ -3,7 +3,7 @@
 Pipeline: discover files (dirs / CSVs / nested zips) -> read_day (clean +
 quality stats) -> concat per instrument -> add_features -> splits / parquet.
 
-CLI:  python -m fxfm.data.loader <inputs...> <out_dir>
+CLI:  python loader.py <inputs...> <out_dir>
 """
 from __future__ import annotations
 

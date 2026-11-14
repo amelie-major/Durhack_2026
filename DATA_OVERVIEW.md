@@ -1,6 +1,6 @@
 # Data overview
 
-Source: `Challenge1.zip` (put it in `data/raw/`, which is gitignored). Loaded with `fxfm.data.loader`.
+Source: `Challenge1.zip` (put it in `data/raw/`, which is gitignored). Loaded with `loader.py`.
 
 ## What it is
 
@@ -42,7 +42,7 @@ Spot files have no `_fp` or `all_in` columns, so the loader currently rejects th
 
 ## Processed output
 
-`python -m fxfm.data.loader data/raw data/processed` writes one parquet per instrument, `manifest.csv` (one row per file, with status, error and quality stats) and `instruments.csv`.
+`python loader.py data/raw data/processed` writes one parquet per instrument, `manifest.csv` (one row per file, with status, error and quality stats) and `instruments.csv`.
 
 Derived features (all price-based ones in basis points, so pairs are comparable):
 

@@ -1,6 +1,6 @@
-# fxfm
+# Durhack 2026
 
-Models for 1-minute FX-forward bars (DurHack 2026). See [DATA_OVERVIEW.md](DATA_OVERVIEW.md) for the data and [CONTRIBUTING.md](CONTRIBUTING.md) for how we work.
+Models for 1-minute FX-forward bars. See [DATA_OVERVIEW.md](DATA_OVERVIEW.md) for the data and [CONTRIBUTING.md](CONTRIBUTING.md) for how we work.
 
 ## Setup
 
@@ -9,17 +9,10 @@ You need Python 3.9 or newer. With conda (or miniforge):
 ```bash
 conda create -n fxfm python=3.12 -y
 conda activate fxfm
-python -m pip install -e ".[dev]"
+python -m pip install -r requirements.txt
 ```
 
 Always use `python -m pip`, not bare `pip`. On some machines `pip` points at an older Python, and the install fails with `No matching distribution found for pandas>=1.5`.
-
-Check that it worked:
-
-```bash
-python --version                 # 3.9 or newer
-python -c "import fxfm; print('ok')"
-```
 
 ## Get the data
 
@@ -27,8 +20,10 @@ Put `Challenge1.zip` in `data/raw/`. Don't unzip it. The `data/` folder is gitig
 
 ## Run the data loader
 
+From the repo root:
+
 ```bash
-python -m fxfm.data.loader data/raw/Challenge1.zip data/processed
+python loader.py data/raw/Challenge1.zip data/processed
 ```
 
 The last argument is the output folder. Everything before it is input, and an input can be a zip, a folder or a CSV. Add `-q` to hide the per-instrument summary.
@@ -43,15 +38,17 @@ Expected result: 27 forward instruments and 159 errors. The errors are all the S
 
 ## Use it from Python
 
+From a script or notebook in the repo root:
+
 ```python
-from fxfm.data.loader import load_processed, time_split, split_instruments
+from loader import load_processed, time_split, split_instruments
 
 series, manifest = load_processed("data/processed")    # {instrument_id: DataFrame}
 train, val, test = time_split(series["EURUSD_EUR_FORWARD_1M_1000000"])
 pretrain_ids, holdout_ids = split_instruments(series, holdout_pairs=["USDSGD"])
 ```
 
-## Tests (smoke test)
+## Tests
 
 ```bash
 python -m pytest

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from fxfm.data import loader as L
+import loader as L
 
 PAIRS = {"EURUSD": 1.14, "USDJPY": 150.0, "GBPUSD": 1.30}
 N_DAYS = 20
