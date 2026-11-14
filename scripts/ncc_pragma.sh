@@ -14,7 +14,10 @@
 # Options (set before sbatch, e.g. `TARGETS=vol sbatch scripts/ncc_pragma.sh`):
 #     TARGETS         which targets to run            (default: "vol spread")
 #     HORIZON         minutes ahead to predict        (default: 30)
-#     SKIP_PRETRAIN   set to 1 to reuse runs/pragma/pretrain.pt
+#     PRESET          model size: gpu or gpu-medium   (default: gpu)
+#     CHECKPOINT      pre-trained weights to write/read (default: runs/pragma/pretrain.pt;
+#                     use a different one per preset so runs don't overwrite each other)
+#     SKIP_PRETRAIN   set to 1 to reuse the checkpoint
 #
 # If sbatch rejects the partition or QOS, run `sinfo` and `sacctmgr show qos`
 # to see what your account may use, and change the two lines marked below.
@@ -34,6 +37,8 @@ set -euo pipefail
 TARGETS="${TARGETS:-vol spread}"
 HORIZON="${HORIZON:-30}"
 SKIP_PRETRAIN="${SKIP_PRETRAIN:-0}"
+PRESET="${PRESET:-gpu}"
+CHECKPOINT="${CHECKPOINT:-runs/pragma/pretrain.pt}"
 
 # sbatch runs a copy of this script, so go to where the job was submitted from.
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
@@ -57,19 +62,21 @@ $PY -c "import torch; print('torch', torch.__version__, 'cuda available:', torch
 
 if [ "$SKIP_PRETRAIN" != "1" ]; then
     echo; echo "=== pretrain ==="
-    $PY -m models.pragma.train pretrain --preset gpu
+    $PY -m models.pragma.train pretrain --preset "$PRESET" --checkpoint "$CHECKPOINT"
 fi
 
 for target in $TARGETS; do
     echo; echo "=== $target: fine-tune from the pre-trained model ==="
-    $PY -m models.pragma.train finetune --target "$target" --horizon "$HORIZON"
+    $PY -m models.pragma.train finetune --target "$target" --horizon "$HORIZON" \
+        --checkpoint "$CHECKPOINT"
 
     echo; echo "=== $target: linear probe on frozen embeddings ==="
-    $PY -m models.pragma.train probe --target "$target" --horizon "$HORIZON"
+    $PY -m models.pragma.train probe --target "$target" --horizon "$HORIZON" \
+        --checkpoint "$CHECKPOINT"
 
     echo; echo "=== $target: same model without pre-training ==="
     $PY -m models.pragma.train finetune --target "$target" --horizon "$HORIZON" \
-        --from-scratch --preset gpu
+        --from-scratch --preset "$PRESET"
 
     echo; echo "=== $target: comparison with XGBoost ==="
     $PY -m models.pragma.compare --target "$target" --horizon "$HORIZON"

@@ -48,6 +48,11 @@ class Config:
 PRESETS = {
     # Real runs, on a GPU.
     "gpu": Config(),
+    # Wider and deeper than "gpu" (about 2x slower per step). Same data and schedule.
+    "gpu-medium": replace(
+        Config(),
+        d_model=256, n_heads=4, d_ffn=1024, history_layers=6,
+    ),
     # Minutes on a laptop CPU. Only proves the pipeline runs end to end.
     "smoke": replace(
         Config(),

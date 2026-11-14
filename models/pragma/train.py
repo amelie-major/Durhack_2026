@@ -18,6 +18,7 @@ checks the pipeline works.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import math
 import os
@@ -44,14 +45,21 @@ from .tokenizer import EVENT_KEYS, Tokenizer
 # Shared helpers
 # ==========================================================================
 
-def pick_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def pick_device(name: str = "auto") -> torch.device:
+    if name != "auto":
+        return torch.device(name)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():  # Apple silicon GPU
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def autocast(device: torch.device):
-    """Mixed precision on GPU (bf16, as in the paper); plain float32 on CPU."""
-    use = device.type == "cuda" and torch.cuda.is_bf16_supported()
-    return torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use)
+    """Mixed precision on CUDA (bf16, as in the paper); plain float32 elsewhere."""
+    if device.type == "cuda" and torch.cuda.is_bf16_supported():
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()  # float32 on CPU and MPS
 
 
 def lr_at(step: int, total_steps: int, peak: float, warmup: int) -> float:
@@ -78,6 +86,15 @@ def clip_and_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> f
     grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
     optimizer.step()
     return grad_norm
+
+
+def log_progress(step: int, total: int, every: int, recent: list, lr: float,
+                 grad_norm: float, started: float, label: str) -> None:
+    """One plain-text line every `every` steps (readable in slurm logs, unlike the bar)."""
+    if every and (step + 1) % every == 0:
+        window = recent[-every:]
+        tqdm.write(f"  [{step + 1:>6}/{total}] {label} {np.mean(window):.4f}  "
+                   f"lr {lr:.2e}  grad norm {grad_norm:.2f}  {time.time() - started:.0f}s")
 
 
 def make_optimizer(model: Pragma, cfg: Config, lr: float) -> torch.optim.Optimizer:
@@ -163,7 +180,9 @@ def pretrain(args) -> None:
     cfg = PRESETS[args.preset]
     if args.steps:
         cfg = replace(cfg, pretrain_steps=args.steps)
-    device = pick_device()
+    if args.batch_size:
+        cfg = replace(cfg, batch_size=args.batch_size)
+    device = pick_device(args.device)
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
 
@@ -210,6 +229,8 @@ def pretrain(args) -> None:
         grad_norm = clip_and_step(model, optimizer)
         bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
                         gnorm=f"{grad_norm:.2f}", refresh=False)
+        log_progress(step, cfg.pretrain_steps, args.log_every, recent, group["lr"], grad_norm,
+                     started, "train loss")
         if args.debug and step < 3:
             tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
                        f"{grad_norm:.3f}  batch " + ", ".join(
@@ -231,7 +252,7 @@ def pretrain(args) -> None:
 # ==========================================================================
 
 def finetune(args) -> None:
-    device = pick_device()
+    device = pick_device(args.device)
     series, _ = load_processed(args.data)
 
     if args.from_scratch:  # same architecture, random weights: does pre-training help?
@@ -283,6 +304,8 @@ def finetune(args) -> None:
         grad_norm = clip_and_step(model, optimizer)
         bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
                         gnorm=f"{grad_norm:.2f}", refresh=False)
+        log_progress(step, cfg.finetune_steps, args.log_every, recent, group["lr"], grad_norm,
+                     started, "train mse (standardised)")
         if args.debug and step < 3:
             tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
                        f"{grad_norm:.3f}")
@@ -320,7 +343,7 @@ def probe(args) -> None:
     from sklearn.linear_model import Ridge
     from sklearn.preprocessing import StandardScaler
 
-    device = pick_device()
+    device = pick_device(args.device)
     series, _ = load_processed(args.data)
     model, tokenizer, cfg = load_checkpoint(args.checkpoint, device)
     rng = np.random.default_rng(cfg.seed)
@@ -364,6 +387,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def common(sub, with_target: bool):
         sub.add_argument("--data", default="data/processed", help="output dir of loader.py")
         sub.add_argument("--checkpoint", default=default_checkpoint)
+        sub.add_argument("--device", choices=["auto", "cuda", "mps", "cpu"], default="auto",
+                         help="auto picks cuda, then mps, then cpu")
         if with_target:
             sub.add_argument("--target", choices=["vol", "spread"], default="vol")
             sub.add_argument("--horizon", type=int, default=30, help="minutes ahead to predict")
@@ -372,6 +397,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     common(sub, with_target=False)
     sub.add_argument("--preset", choices=sorted(PRESETS), default="gpu")
     sub.add_argument("--steps", type=int, help="override the preset's number of steps")
+    sub.add_argument("--batch-size", type=int, help="override the preset's batch size "
+                                                    "(lower it if the GPU runs out of memory)")
     sub.set_defaults(run=pretrain)
 
     sub = commands.add_parser("finetune", help="train on a target, from the checkpoint")
@@ -388,6 +415,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.set_defaults(run=probe)
 
     for name in ("pretrain", "finetune"):
+        commands.choices[name].add_argument(
+            "--log-every", type=int, default=100,
+            help="print a progress line every N steps (0 to turn off)")
         commands.choices[name].add_argument(
             "--debug", action="store_true",
             help="anomaly detection + print shapes/grad norms for the first steps")
