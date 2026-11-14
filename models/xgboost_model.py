@@ -126,8 +126,8 @@ def build_dataset(series: Dict[str, pd.DataFrame], target: str,
     parts: Dict[str, List[pd.DataFrame]] = {"train": [], "val": [], "test": []}
 
     for df in series.values():
-        if target == "vol" and df.attrs["tenor"] != VOL_TENOR:
-            continue  # other tenors would count each price move again
+        if target == "vol" and len(series) > 1 and df.attrs["tenor"] != VOL_TENOR:
+            continue  # other tenors would count each price move again (a lone instrument is kept)
 
         rows = build_features(df)
         rows["timestamp"] = df["timestamp"]
