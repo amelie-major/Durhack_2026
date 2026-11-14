@@ -50,16 +50,14 @@ def pick_device(name: str = "auto") -> torch.device:
         return torch.device(name)
     if torch.cuda.is_available():
         return torch.device("cuda")
-    if torch.backends.mps.is_available():  # Apple silicon GPU
-        return torch.device("mps")
     return torch.device("cpu")
 
 
 def autocast(device: torch.device):
-    """Mixed precision on CUDA (bf16, as in the paper); plain float32 elsewhere."""
+    """Mixed precision on CUDA (bf16, as in the paper); plain float32 on CPU."""
     if device.type == "cuda" and torch.cuda.is_bf16_supported():
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-    return contextlib.nullcontext()  # float32 on CPU and MPS
+    return contextlib.nullcontext()  # float32 on CPU
 
 
 def lr_at(step: int, total_steps: int, peak: float, warmup: int) -> float:
@@ -387,8 +385,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def common(sub, with_target: bool):
         sub.add_argument("--data", default="data/processed", help="output dir of loader.py")
         sub.add_argument("--checkpoint", default=default_checkpoint)
-        sub.add_argument("--device", choices=["auto", "cuda", "mps", "cpu"], default="auto",
-                         help="auto picks cuda, then mps, then cpu")
+        sub.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
+                         help="auto picks cuda if available, else cpu")
         if with_target:
             sub.add_argument("--target", choices=["vol", "spread"], default="vol")
             sub.add_argument("--horizon", type=int, default=30, help="minutes ahead to predict")
