@@ -384,6 +384,9 @@ def read_day(src, meta: Optional[FileMeta] = None) -> Tuple[pd.DataFrame, dict]:
 
 BASIS_POINTS = 1e4  # 1 basis point (bp) = 0.01%
 
+# Trailing window lengths (in bars) for the volatility columns.
+VOL_WINDOWS = (15, 60, 240)
+
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add derived columns to one instrument's bars (sorted, no duplicate times).
@@ -416,6 +419,18 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df["spread_bp"] = (df["close_ask"] - df["close_bid"]) / close * BASIS_POINTS
     df["fp_bp"] = df["close_mid_fp"] / close * BASIS_POINTS
     df["dfp_bp"] = df["fp_bp"].diff().fillna(0.0)  # change in forward points
+
+    # --- Volatility (bp per bar, trailing windows only: no look-ahead) --------
+    # Returns that span missing bars are excluded so gaps don't inflate vol.
+    clean_ret = df["ret_bp"].where(~df["is_gap"])
+    # Parkinson estimator: per-bar variance from the high-low range.
+    parkinson_var = df["range_bp"] ** 2 / (4.0 * np.log(2.0))
+    for window in VOL_WINDOWS:
+        min_periods = max(2, window // 2)
+        df[f"vol_{window}"] = clean_ret.rolling(window, min_periods=min_periods).std()
+        df[f"pk_vol_{window}"] = np.sqrt(
+            parkinson_var.rolling(window, min_periods=min_periods).mean()
+        )
 
     # --- Settlement date ------------------------------------------------------
     settle = df["settlement_date"]
