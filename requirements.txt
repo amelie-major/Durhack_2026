@@ -4,3 +4,4 @@ pyarrow
 xgboost>=2.0
 scikit-learn
 pytest>=7
+torch>=2.2

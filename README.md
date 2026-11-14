@@ -53,3 +53,21 @@ pretrain_ids, holdout_ids = split_instruments(series, holdout_pairs=["USDSGD"])
 ```bash
 python -m pytest
 ```
+
+## PRAGMA-style model
+
+A small reimplementation of Revolut's PRAGMA ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) in `models/pragma/`. One bar is one "event"; the model sees the last 240 bars of an instrument and is scored on exactly the same test rows as the XGBoost model. Settings live in `models/pragma/config.py`.
+
+Run on a GPU machine (Colab, NCC) from the repo root, after the data loader:
+
+```bash
+python -m models.pragma.train pretrain --preset gpu     # masked pre-training, writes runs/pragma/pretrain.pt
+python -m models.pragma.train finetune --target vol     # fine-tune a regression head
+python -m models.pragma.train probe    --target vol     # linear model on frozen embeddings
+python -m models.pragma.train finetune --target vol --from-scratch   # optional: no pre-training
+python -m models.pragma.compare        --target vol     # table: baseline / XGBoost / PRAGMA
+```
+
+Repeat the last four with `--target spread`. Use `--preset smoke` on `pretrain` for a few-minute CPU run that only checks the pipeline works; its scores are not meaningful. `runs/` is gitignored.
+
+On NCC, `sbatch scripts/ncc_pragma.sh` runs all of the above for both targets in one job (copy `data/processed/` over first; see the top of the script).
