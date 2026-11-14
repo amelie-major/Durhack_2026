@@ -1,70 +1,36 @@
 /**
- * Step 2 shell: real globe behind placeholder panels.
- * Steps 3–7 replace the placeholders one by one.
+ * Layout: the globe fills the screen; small panels sit in the corners so it stays visible.
+ * Steps 5–7 add the forecast panel, execution strip and replay controls.
  */
-import { useCallback, useState } from 'react'
-import { CloudLightning, CloudSun, Sun } from 'lucide-react'
-import FxGlobe, { type GlobeSelection } from './components/globe/FxGlobe'
-
-const levels = [
-  { name: 'Calm', Icon: Sun, cls: 'text-calm' },
-  { name: 'Unsettled', Icon: CloudSun, cls: 'text-unsettled' },
-  { name: 'Storm', Icon: CloudLightning, cls: 'text-storm' },
-]
+import FxGlobe from './components/globe/FxGlobe'
+import ConvertCard from './components/convert/ConvertCard'
+import StormLegend from './components/layout/StormLegend'
 
 export default function App() {
-  const [selection, setSelection] = useState<GlobeSelection | null>(null)
-  const handleSelect = useCallback((s: GlobeSelection | null) => setSelection(s), [])
-
   return (
     <div className="relative h-full w-full">
       {/* Globe layer (full screen, behind everything) */}
-      <FxGlobe selectedCode={selection?.code ?? null} onSelect={handleSelect} />
+      <FxGlobe />
 
-      {/* Top bar */}
-      <header className="glass absolute top-4 left-4 right-4 flex items-center justify-between px-5 py-3">
-        <h1 className="font-display text-xl font-semibold tracking-tight">
+      {/* Top-left: title. Top-right: last updated. Small pills, not a full-width bar */}
+      <header className="pointer-events-none absolute top-4 left-4 right-4 flex items-start justify-between gap-4">
+        <h1 className="glass pointer-events-auto px-4 py-2 font-display text-lg font-semibold tracking-tight">
           FX Forecast <span className="text-ink-muted font-normal">· next 60 min outlook</span>
         </h1>
-        <p className="text-ink-muted text-sm">
+        <p className="glass pointer-events-auto px-4 py-2 text-sm text-ink-muted">
           Last updated <span className="num text-ink">14:32</span>
         </p>
       </header>
 
-      {/* Left: convert card placeholder */}
-      <section className="glass absolute top-24 left-4 w-80 p-5">
-        <h2 className="font-display text-lg mb-3">Convert</h2>
-        <p className="num text-3xl">£10,000.00</p>
-        <p className="text-ink-muted text-sm mt-1">GBP → JPY · step 4</p>
-      </section>
+      {/* Bottom-left: convert card */}
+      <div className="absolute bottom-4 left-4">
+        <ConvertCard />
+      </div>
 
-      {/* Right: forecast panel placeholder — shows the globe selection + storm scale tokens */}
-      <section className="glass absolute top-24 right-4 w-80 p-5 space-y-3" aria-live="polite">
-        <h2 className="font-display text-lg">Selected</h2>
-        {selection ? (
-          <p>
-            <span className="font-medium">{selection.name}</span>{' '}
-            <span className="text-ink-muted">
-              · {selection.zone ? selection.zone.code : 'No forecast'}
-            </span>
-          </p>
-        ) : (
-          <p className="text-ink-muted text-sm">Click a country on the globe (Esc to clear)</p>
-        )}
-
-        <h2 className="font-display text-lg pt-2">Storm scale</h2>
-        {levels.map(({ name, Icon, cls }) => (
-          <div key={name} className={`flex items-center gap-3 ${cls}`}>
-            <Icon className="size-5" aria-hidden />
-            <span className="font-medium">{name}</span>
-          </div>
-        ))}
-      </section>
-
-      {/* Bottom: execution strip placeholder */}
-      <footer className="glass absolute bottom-4 left-4 right-4 px-5 py-3 text-ink-muted text-sm">
-        Execution window strip · step 6 — Replay controls · step 7
-      </footer>
+      {/* Bottom-right: storm scale key */}
+      <div className="absolute bottom-4 right-4 hidden sm:block">
+        <StormLegend />
+      </div>
     </div>
   )
 }

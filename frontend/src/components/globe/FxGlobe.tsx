@@ -1,9 +1,10 @@
 /**
- * Step 2: full-screen interactive globe.
- * - Auto-spins; pauses while you drag; resumes 3 s after you let go (unless a country is selected)
+ * Full-screen interactive globe.
+ * - Auto-spins; pauses while you drag; resumes 3 s after you let go (unless something is in focus)
  * - Hover tooltip on every country
- * - Click a country → camera flies to it; click empty space or press Esc to clear
- * - USD / EUR / JPY / SGD zones are lit; everything else is "No forecast"
+ * - Click a country → it's selected and the camera flies there; a lit zone also becomes the "To" currency
+ * - The "To" currency's whole zone is highlighted (e.g. every eurozone country for EUR)
+ * - Click empty globe or press Esc to clear the selection and resume spinning
  * - Respects the OS "reduce motion" setting (no spin, instant camera moves)
  *
  * Step 3 replaces the single "forecast available" tint with storm colours from mock data.
@@ -14,23 +15,13 @@ import { HOME_CURRENCY, SINGAPORE_MARKER, ZONE_BY_COUNTRY, type CurrencyZone } f
 import { countryCode, escapeHtml, type CountryFeature } from '../../lib/geo'
 import { usePrefersReducedMotion, useWindowSize } from '../../lib/hooks'
 import { cssVar, withAlpha } from '../../lib/theme'
+import { useAppStore } from '../../store/useAppStore'
 
 const RESUME_SPIN_AFTER_MS = 3000
 const FLY_MS = 1200
 const SPIN_SPEED = 0.35
 const START_VIEW = { lat: 22, lng: 20, altitude: 2.4 }
-const FOCUS_ALTITUDE = 1.7
-
-export interface GlobeSelection {
-  code: string // ISO alpha-3, e.g. "JPN"
-  name: string // e.g. "Japan"
-  zone: CurrencyZone | null // null = "No forecast"
-}
-
-interface FxGlobeProps {
-  selectedCode: string | null
-  onSelect: (selection: GlobeSelection | null) => void
-}
+const FOCUS_ALTITUDE = 1.9
 
 type SingaporeMarker = typeof SINGAPORE_MARKER
 
@@ -43,13 +34,20 @@ function tooltipHtml(name: string, zone: CurrencyZone | null): string {
   return `<div class="globe-tip"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(detail)}</span></div>`
 }
 
-export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
+export default function FxGlobe() {
   const globeRef = useRef<GlobeMethods | undefined>(undefined)
   const resumeTimer = useRef<number | undefined>(undefined)
-  const selectedRef = useRef(selectedCode) // read by the spin timer, which outlives renders
+
+  const selectedCode = useAppStore((s) => s.selected?.code ?? null)
+  const quote = useAppStore((s) => s.quote)
+  const focus = useAppStore((s) => s.focus)
+  const selectCountry = useAppStore((s) => s.selectCountry)
+  const clearSelection = useAppStore((s) => s.clearSelection)
+
+  const focusRef = useRef(focus) // read by the spin timer, which outlives renders
   useEffect(() => {
-    selectedRef.current = selectedCode
-  }, [selectedCode])
+    focusRef.current = focus
+  }, [focus])
 
   const reducedMotion = usePrefersReducedMotion()
   const { width, height } = useWindowSize()
@@ -95,7 +93,7 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
     const controls = globe.controls()
 
     controls.autoRotateSpeed = SPIN_SPEED
-    controls.autoRotate = !reducedMotion && !selectedRef.current
+    controls.autoRotate = !reducedMotion && !focusRef.current
 
     const onStart = () => {
       window.clearTimeout(resumeTimer.current)
@@ -105,7 +103,7 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
       if (reducedMotion) return
       window.clearTimeout(resumeTimer.current)
       resumeTimer.current = window.setTimeout(() => {
-        if (!selectedRef.current) controls.autoRotate = true
+        if (!focusRef.current) controls.autoRotate = true
       }, RESUME_SPIN_AFTER_MS)
     }
 
@@ -118,44 +116,44 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
     }
   }, [ready, reducedMotion])
 
-  // 3. Fly to the selected country; resume spinning when the selection is cleared
-  const flyTo = useCallback(
-    (lat: number, lng: number) => {
-      globeRef.current?.pointOfView({ lat, lng, altitude: FOCUS_ALTITUDE }, reducedMotion ? 0 : FLY_MS)
-    },
-    [reducedMotion],
-  )
-
+  // 3. Fly to whatever is in focus (from a globe click OR the convert card); spin again when cleared
   useEffect(() => {
     const globe = globeRef.current
     if (!ready || !globe) return
-    if (selectedCode) {
+    if (focus) {
       window.clearTimeout(resumeTimer.current)
       globe.controls().autoRotate = false
+      globe.pointOfView({ ...focus, altitude: FOCUS_ALTITUDE }, reducedMotion ? 0 : FLY_MS)
     } else if (!reducedMotion) {
       globe.controls().autoRotate = true
     }
-  }, [ready, selectedCode, reducedMotion])
+  }, [ready, focus, reducedMotion])
 
-  // Esc clears the selection
+  // Esc clears the selection (but not while typing in a field)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onSelect(null)
+      const target = e.target as HTMLElement | null
+      if (e.key === 'Escape' && !target?.closest('input, select, textarea')) clearSelection()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onSelect])
+  }, [clearSelection])
 
-  // 4. Polygon styling (accessors re-run when hover/selection changes)
+  // 4. Polygon styling (accessors re-run when hover / selection / "To" currency change)
+  const isActive = useCallback(
+    (code: string) =>
+      code === hoveredCode || code === selectedCode || ZONE_BY_COUNTRY.get(code)?.code === quote,
+    [hoveredCode, selectedCode, quote],
+  )
+
   const capColor = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
       const lit = ZONE_BY_COUNTRY.has(code)
-      const active = code === hoveredCode || code === selectedCode
-      if (lit) return withAlpha(colors.accent, active ? 0.85 : 0.5)
-      return withAlpha(colors.nodata, active ? 0.75 : 0.35)
+      if (lit) return withAlpha(colors.accent, isActive(code) ? 0.85 : 0.45)
+      return withAlpha(colors.nodata, isActive(code) ? 0.75 : 0.35)
     },
-    [colors, hoveredCode, selectedCode],
+    [colors, isActive],
   )
 
   const sideColor = useCallback(
@@ -178,10 +176,10 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
       if (code === selectedCode) return 0.03
-      if (code === hoveredCode) return 0.02
+      if (isActive(code)) return 0.02
       return ZONE_BY_COUNTRY.has(code) ? 0.012 : 0.006
     },
-    [hoveredCode, selectedCode],
+    [selectedCode, isActive],
   )
 
   const polygonLabel = useCallback((obj: object) => {
@@ -197,10 +195,9 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
       const zone = ZONE_BY_COUNTRY.get(code) ?? null
       // Single-country zones fly to a fixed anchor (so clicking Alaska still centres the US)
       const target = zone && zone.countries.length === 1 ? zone.anchor : coords
-      flyTo(target.lat, target.lng)
-      onSelect({ code, name: p.NAME, zone })
+      selectCountry({ code, name: p.NAME, zone }, { lat: target.lat, lng: target.lng })
     },
-    [flyTo, onSelect],
+    [selectCountry],
   )
 
   const handlePolygonHover = useCallback((obj: object | null) => {
@@ -210,10 +207,9 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
   const handlePointClick = useCallback(
     (obj: object) => {
       const m = obj as SingaporeMarker
-      flyTo(m.lat, m.lng)
-      onSelect({ code: m.code, name: m.name, zone: ZONE_BY_COUNTRY.get(m.code) ?? null })
+      selectCountry({ code: m.code, name: m.name, zone: ZONE_BY_COUNTRY.get(m.code) ?? null }, { lat: m.lat, lng: m.lng })
     },
-    [flyTo, onSelect],
+    [selectCountry],
   )
 
   const handlePointHover = useCallback((obj: object | null) => {
@@ -253,16 +249,16 @@ export default function FxGlobe({ selectedCode, onSelect }: FxGlobeProps) {
         pointLat="lat"
         pointLng="lng"
         pointColor={() => colors.accent}
-        pointAltitude={(obj: object) => ((obj as SingaporeMarker).code === hoveredCode ? 0.05 : 0.025)}
+        pointAltitude={(obj: object) => (isActive((obj as SingaporeMarker).code) ? 0.05 : 0.025)}
         pointRadius={0.9}
         pointLabel={(obj: object) => tooltipHtml((obj as SingaporeMarker).name, ZONE_BY_COUNTRY.get('SGP') ?? null)}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
-        // Clicking empty globe or space clears the selection
-        onGlobeClick={() => onSelect(null)}
+        // Clicking empty globe clears the selection
+        onGlobeClick={clearSelection}
       />
       {loadError && (
-        <p role="alert" className="glass absolute bottom-24 left-1/2 -translate-x-1/2 px-4 py-2 text-sm text-ink-muted">
+        <p role="alert" className="glass absolute top-20 left-1/2 -translate-x-1/2 px-4 py-2 text-sm text-ink-muted">
           Couldn&rsquo;t load the country map. Check that public/assets/countries.geojson exists.
         </p>
       )}
