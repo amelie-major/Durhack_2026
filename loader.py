@@ -1,9 +1,33 @@
-"""Loader for 1-minute FX-forward bars (one CSV per instrument per day).
+"""Load 1-minute FX-forward price bars into clean, feature-rich DataFrames.
 
-Pipeline: discover files (dirs / CSVs / nested zips) -> read_day (clean +
-quality stats) -> concat per instrument -> add_features -> splits / parquet.
+Input
+-----
+The raw data is one CSV per instrument per day. Each filename describes the
+instrument and the day, for example::
 
-CLI:  python loader.py <inputs...> <out_dir>
+    EURUSD_EUR_FWD_1M_1000000_20240105.csv
+    |      |   |   |  |       |
+    pair   |   |   |  |       date (YYYYMMDD)
+           |   |   |  notional
+           |   |   tenor
+           |   product
+           dealt currency
+
+Files can live in folders, in zip files, or in zips nested inside zips. Some
+filenames have a junk prefix (e.g. "85de32c1-EURUSD_...") which is ignored.
+
+Pipeline
+--------
+1. discover()      find every data file and skip duplicate copies
+2. read_day()      read one CSV, drop bad rows, report quality stats
+3. load_all()      join all days of each instrument into one DataFrame
+4. add_features()  add returns, spreads, gaps, settlement and calendar columns
+5. time_split() / split_instruments() / save_processed()
+                   prepare train/val/test splits or write parquet files
+
+Command line
+------------
+    python loader.py <input dirs, CSVs or zips ...> <output dir>
 """
 from __future__ import annotations
 
@@ -20,389 +44,621 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence,
 import numpy as np
 import pandas as pd
 
-# --------------------------------------------------------------------------
-# Filenames
-# --------------------------------------------------------------------------
 
-# PAIR(6)_DEALT(3)_PRODUCT_TENOR_NOTIONAL_YYYYMMDD.csv, optionally with a junk
-# prefix such as "85de32c1-" (lookbehind stops it eating part of a longer token).
+# ==========================================================================
+# 1. Understanding filenames
+# ==========================================================================
+
 _FILENAME_RE = re.compile(
-    r"(?<![A-Za-z0-9])"
-    r"(?P<pair>[A-Z]{6})_(?P<dealt>[A-Z]{3})_(?P<product>[A-Z][A-Z0-9]*)_"
-    r"(?P<tenor>\d*[A-Z]+)_(?P<notional>\d+)_(?P<date>\d{8})\.csv$"
+    r"""
+    (?<![A-Za-z0-9])                 # must not start in the middle of a word
+    (?P<pair>[A-Z]{6})        _      # currency pair,  e.g. EURUSD
+    (?P<dealt>[A-Z]{3})       _      # dealt currency, e.g. EUR
+    (?P<product>[A-Z][A-Z0-9]*) _    # product,        e.g. FWD
+    (?P<tenor>\d*[A-Z]+)      _      # tenor,          e.g. 1M, ON, SPOT
+    (?P<notional>\d+)         _      # notional,       e.g. 1000000
+    (?P<date>\d{8})                  # trading day,    e.g. 20240105
+    \.csv$
+    """,
+    re.VERBOSE,
 )
 
 
 @dataclass(frozen=True)
 class FileMeta:
-    pair: str
-    base: str
-    quote: str
-    dealt: str
-    product: str
-    tenor: str
-    notional: int
-    date: _date
-    instrument_id: str  # everything except the date
+    """Everything we can learn about a data file from its name."""
+
+    pair: str           # "EURUSD"
+    base: str           # "EUR" (first half of the pair)
+    quote: str          # "USD" (second half of the pair)
+    dealt: str          # "EUR"
+    product: str        # "FWD"
+    tenor: str          # "1M"
+    notional: int       # 1000000
+    date: _date         # date(2024, 1, 5)
+    instrument_id: str  # "EURUSD_EUR_FWD_1M_1000000" (everything except the date)
 
     def attrs(self) -> dict:
-        d = asdict(self)
-        d.pop("date")
-        return d
+        """Instrument-level fields, suitable for DataFrame.attrs (no date)."""
+        fields = asdict(self)
+        fields.pop("date")
+        return fields
+
+
+def _basename(path: str) -> str:
+    """Last component of a path, accepting both / and \\ separators."""
+    return re.split(r"[\\/]", str(path))[-1]
 
 
 def parse_filename(name: str) -> Optional[FileMeta]:
-    """Parse a data filename (path and junk prefix tolerated); None if no match."""
-    base_name = re.split(r"[\\/]", str(name))[-1]
-    if base_name.startswith("._"):
+    """Parse a data filename into a FileMeta.
+
+    Leading folders and junk prefixes are tolerated. Returns None if the name
+    is not a data file (including macOS "._" resource-fork files).
+    """
+    filename = _basename(name)
+    if filename.startswith("._"):
         return None
-    m = _FILENAME_RE.search(base_name)
-    if not m:
+
+    match = _FILENAME_RE.search(filename)
+    if not match:
         return None
+
     try:
-        d = pd.Timestamp(m["date"]).date()
-    except ValueError:
+        trading_day = pd.Timestamp(match["date"]).date()
+    except ValueError:  # e.g. 20241399 is eight digits but not a real date
         return None
-    pair, product, tenor = m["pair"], m["product"], m["tenor"]
-    notional = int(m["notional"])
+
+    pair = match["pair"]
+    dealt = match["dealt"]
+    product = match["product"]
+    tenor = match["tenor"]
+    notional = int(match["notional"])
+
     return FileMeta(
-        pair=pair, base=pair[:3], quote=pair[3:], dealt=m["dealt"], product=product,
-        tenor=tenor, notional=notional, date=d,
-        instrument_id=f"{pair}_{m['dealt']}_{product}_{tenor}_{notional}",
+        pair=pair,
+        base=pair[:3],
+        quote=pair[3:],
+        dealt=dealt,
+        product=product,
+        tenor=tenor,
+        notional=notional,
+        date=trading_day,
+        instrument_id=f"{pair}_{dealt}_{product}_{tenor}_{notional}",
     )
 
 
-# --------------------------------------------------------------------------
-# Discovery
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 2. Finding files (folders, CSVs, zips, zips inside zips)
+# ==========================================================================
+
+# A "reader" is a function with no arguments that returns a file's bytes.
+# Using readers means we only open a file when we actually need its content.
+Reader = Callable[[], bytes]
+
 
 @dataclass
 class Source:
+    """One data file we have found but not yet read."""
+
     meta: FileMeta
-    source: str                      # human-readable location
-    read_bytes: Callable[[], bytes]  # lazily fetches the CSV content
+    source: str          # where it came from, e.g. "data.zip!2024/EURUSD_...csv"
+    read_bytes: Reader   # call this to get the CSV content
 
 
-def _is_junk(path: str) -> bool:
+def _is_macos_junk(path: str) -> bool:
+    """True for the __MACOSX folders and "._" files that macOS adds to zips."""
     parts = re.split(r"[\\/]", path)
-    return any(p == "__MACOSX" for p in parts) or parts[-1].startswith("._")
+    return "__MACOSX" in parts or parts[-1].startswith("._")
 
 
-def _walk_zip(zf: zipfile.ZipFile, label: str) -> Iterator[Tuple[str, Callable[[], bytes]]]:
-    for info in zf.infolist():
-        if info.is_dir() or _is_junk(info.filename):
+def _reader_for_disk_file(path: str) -> Reader:
+    def read() -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+    return read
+
+
+def _reader_for_zip_entry(archive: zipfile.ZipFile, entry: zipfile.ZipInfo) -> Reader:
+    def read() -> bytes:
+        return archive.read(entry)
+    return read
+
+
+def _walk_zip(archive: zipfile.ZipFile, label: str) -> Iterator[Tuple[str, Reader]]:
+    """Yield (location, reader) for every CSV in a zip, opening nested zips too.
+
+    Locations use "!" to show "inside of", e.g. "outer.zip!inner.zip!file.csv".
+    """
+    for entry in archive.infolist():
+        if entry.is_dir() or _is_macos_junk(entry.filename):
             continue
-        lower = info.filename.lower()
-        loc = f"{label}!{info.filename}"
-        if lower.endswith(".zip"):
+
+        location = f"{label}!{entry.filename}"
+        name = entry.filename.lower()
+
+        if name.endswith(".zip"):
             try:
-                inner = zipfile.ZipFile(io.BytesIO(zf.read(info)))
+                inner_archive = zipfile.ZipFile(io.BytesIO(archive.read(entry)))
             except zipfile.BadZipFile:
-                continue
-            yield from _walk_zip(inner, loc)
-        elif lower.endswith(".csv"):
-            yield loc, (lambda zf=zf, info=info: zf.read(info))
+                continue  # skip corrupt inner zips rather than failing the run
+            yield from _walk_zip(inner_archive, location)
+
+        elif name.endswith(".csv"):
+            yield location, _reader_for_zip_entry(archive, entry)
 
 
-def _walk_path(path: str) -> Iterator[Tuple[str, Callable[[], bytes]]]:
-    def disk(p):
-        def _r():
-            with open(p, "rb") as f:
-                return f.read()
-        return _r
+def _walk_path(path: str) -> Iterator[Tuple[str, Reader]]:
+    """Yield (location, reader) for every CSV under a folder, CSV or zip path.
 
+    Folders are walked in sorted order so results are reproducible.
+    """
     if os.path.isdir(path):
-        for root, dirs, files in os.walk(path):
-            dirs[:] = sorted(d for d in dirs if d != "__MACOSX")
-            for fn in sorted(files):
-                if fn.startswith("._"):
+        for folder, subfolders, filenames in os.walk(path):
+            # Editing subfolders in place controls where os.walk goes next.
+            subfolders[:] = sorted(d for d in subfolders if d != "__MACOSX")
+            for filename in sorted(filenames):
+                if filename.startswith("._"):
                     continue
-                yield from _walk_path(os.path.join(root, fn))
+                yield from _walk_path(os.path.join(folder, filename))
+
     elif os.path.isfile(path):
-        low = path.lower()
-        if low.endswith(".zip"):
-            # left open on purpose: entries are read lazily by the openers
+        name = path.lower()
+        if name.endswith(".zip"):
+            # The zip is left open on purpose: its readers need it later.
             yield from _walk_zip(zipfile.ZipFile(path), path)
-        elif low.endswith(".csv"):
-            yield path, disk(path)
+        elif name.endswith(".csv"):
+            yield path, _reader_for_disk_file(path)
+
     else:
         raise FileNotFoundError(path)
 
 
 def discover(paths: Iterable[str], skipped: Optional[List[Tuple[FileMeta, str]]] = None) -> Iterator[Source]:
-    """Yield every recognised data file under `paths`, once per (instrument_id, date).
+    """Yield every recognised data file under `paths`, once per (instrument, day).
 
-    First occurrence wins; later copies (e.g. extracted next to its zip) are
-    appended to `skipped` if a list is given.
+    The same day can appear more than once, e.g. inside a zip and also
+    extracted next to it. The first copy found is used; later copies are
+    appended to `skipped` (if a list is given) as (meta, location).
     """
     if isinstance(paths, (str, os.PathLike)):
         paths = [paths]
-    seen = set()
-    for p in paths:
-        for loc, reader in _walk_path(os.fspath(p)):
-            meta = parse_filename(loc.split("!")[-1])
+
+    already_seen = set()
+    for path in paths:
+        for location, reader in _walk_path(os.fspath(path)):
+            filename = location.split("!")[-1]
+            meta = parse_filename(filename)
             if meta is None:
-                continue
+                continue  # not a data file
+
             key = (meta.instrument_id, meta.date)
-            if key in seen:
+            if key in already_seen:
                 if skipped is not None:
-                    skipped.append((meta, loc))
+                    skipped.append((meta, location))
                 continue
-            seen.add(key)
-            yield Source(meta, loc, reader)
+
+            already_seen.add(key)
+            yield Source(meta, location, reader)
 
 
-# --------------------------------------------------------------------------
-# Reading one day
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 3. Reading and cleaning one day
+# ==========================================================================
 
+# The columns we keep from each raw CSV.
 KEEP_COLS = [
-    "timestamp", "open_mid", "high_mid", "low_mid", "close_mid",
-    "close_bid", "close_ask", "close_mid_fp", "close_mid_all_in", "settlement_date",
+    "timestamp",
+    "open_mid", "high_mid", "low_mid", "close_mid",
+    "close_bid", "close_ask",
+    "close_mid_fp",       # forward points at the close
+    "close_mid_all_in",   # close mid + forward points
+    "settlement_date",
 ]
+
 _OHLC = ["open", "high", "low", "close"]
-_PRICE_COLS = [f"{o}_{s}" for o in _OHLC for s in ("bid", "ask", "mid")]
+
+# Every price column that might be present, e.g. "open_bid", "close_mid".
+_PRICE_COLS = [f"{bar_part}_{side}" for bar_part in _OHLC for side in ("bid", "ask", "mid")]
+
+
+def _parse_and_dedupe(raw: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+    """Parse date columns, sort by time and drop repeated timestamps.
+
+    Returns (clean frame, number of duplicate rows removed).
+    """
+    raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
+    raw["settlement_date"] = pd.to_datetime(raw["settlement_date"], errors="coerce")
+
+    raw = raw.sort_values("timestamp", kind="stable")  # stable: keep file order on ties
+    is_duplicate = raw["timestamp"].duplicated(keep="first")
+    raw = raw[~is_duplicate].reset_index(drop=True)
+    return raw, int(is_duplicate.sum())
+
+
+def _find_bad_rows(df: pd.DataFrame) -> Dict[str, pd.Series]:
+    """Return one True/False mask per kind of problem, aligned with `df`."""
+    no_problem = pd.Series(False, index=df.index)
+
+    # Bid above ask in any of open/high/low/close.
+    crossed = no_problem.copy()
+    for bar_part in _OHLC:
+        bid, ask = f"{bar_part}_bid", f"{bar_part}_ask"
+        if bid in df and ask in df:
+            crossed |= df[bid] > df[ask]
+
+    # The bar's high is below its low.
+    high_below_low = df["high_mid"] < df["low_mid"]
+
+    # Any price that is zero or negative.
+    price_cols = [c for c in _PRICE_COLS if c in df.columns]
+    if price_cols:
+        non_positive = (df[price_cols] <= 0).any(axis=1)
+    else:
+        non_positive = no_problem.copy()
+
+    # Any kept column is missing (includes unparseable settlement dates).
+    missing_value = df[KEEP_COLS].isna().any(axis=1)
+
+    return {
+        "crossed": crossed,
+        "high_lt_low": high_below_low,
+        "nonpositive": non_positive,
+        "nan": missing_value,
+    }
+
+
+def _max_abs_mismatch(df: pd.DataFrame, actual: str, expected: Callable[[str], pd.Series],
+                      needs: Sequence[str]) -> float:
+    """Largest |actual - expected| over open/high/low/close, as a sanity check.
+
+    `actual` and `needs` are column suffixes (e.g. "mid"); for each bar part
+    such as "open" the check is skipped unless all the needed columns exist.
+    Returns 0.0 if nothing could be checked.
+    """
+    mismatches = []
+    for bar_part in _OHLC:
+        if all(f"{bar_part}_{suffix}" in df for suffix in needs):
+            mismatches.append(df[f"{bar_part}_{actual}"] - expected(bar_part))
+
+    if not mismatches:
+        return 0.0
+    worst = pd.concat(mismatches, axis=1).abs().max().max()
+    return 0.0 if pd.isna(worst) else float(worst)
 
 
 def read_day(src, meta: Optional[FileMeta] = None) -> Tuple[pd.DataFrame, dict]:
-    """Read one daily CSV (path, bytes or file-like). Returns (clean_df, quality_stats)."""
+    """Read and clean one daily CSV.
+
+    `src` can be a path, raw bytes or a file-like object. `meta` is accepted
+    for convenience but not needed.
+
+    Returns (clean_df, stats). `clean_df` has only KEEP_COLS and no bad rows.
+    `stats` counts what was found and removed (see the keys at the bottom).
+    """
     if isinstance(src, (bytes, bytearray)):
         src = io.BytesIO(src)
     raw = pd.read_csv(src)
-    missing = [c for c in KEEP_COLS if c not in raw.columns]
-    if missing:
-        raise ValueError(f"missing columns: {missing}")
 
-    raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
-    raw["settlement_date"] = pd.to_datetime(raw["settlement_date"], errors="coerce")
-    n_raw = len(raw)
-    raw = raw.sort_values("timestamp", kind="stable")
-    dup = raw["timestamp"].duplicated(keep="first")
-    n_dup = int(dup.sum())
-    raw = raw[~dup].reset_index(drop=True)
+    missing_cols = [c for c in KEEP_COLS if c not in raw.columns]
+    if missing_cols:
+        raise ValueError(f"missing columns: {missing_cols}")
 
-    present = [c for c in _PRICE_COLS if c in raw.columns]
-    # --- quality checks on the raw (de-duplicated) rows -------------------
-    crossed = pd.Series(False, index=raw.index)
-    for o in _OHLC:
-        if f"{o}_bid" in raw and f"{o}_ask" in raw:
-            crossed |= raw[f"{o}_bid"] > raw[f"{o}_ask"]
-    hl = raw["high_mid"] < raw["low_mid"]
-    nonpos = (raw[present] <= 0).any(axis=1) if present else pd.Series(False, index=raw.index)
-    nan_row = raw[[c for c in KEEP_COLS if c != "settlement_date"]].isna().any(axis=1) | raw["settlement_date"].isna()
+    n_raw_rows = len(raw)
+    df, n_duplicates = _parse_and_dedupe(raw)
 
-    def _max_abs(parts):
-        errs = [e for e in parts if e is not None]
-        if not errs:
-            return 0.0
-        v = pd.concat(errs, axis=1).abs().max().max()
-        return 0.0 if pd.isna(v) else float(v)
+    problems = _find_bad_rows(df)
+    is_bad = problems["crossed"] | problems["high_lt_low"] | problems["nonpositive"] | problems["nan"]
 
-    mid_errs = [raw[f"{o}_mid"] - (raw[f"{o}_bid"] + raw[f"{o}_ask"]) / 2
-                if all(f"{o}_{s}" in raw for s in ("bid", "ask", "mid")) else None for o in _OHLC]
-    allin_errs = [raw[f"{o}_mid_all_in"] - (raw[f"{o}_mid"] + raw[f"{o}_mid_fp"])
-                  if all(f"{o}_{s}" in raw for s in ("mid_all_in", "mid", "mid_fp")) else None for o in _OHLC]
+    # mid should equal (bid + ask) / 2
+    max_mid_err = _max_abs_mismatch(
+        df, actual="mid", needs=("bid", "ask", "mid"),
+        expected=lambda p: (df[f"{p}_bid"] + df[f"{p}_ask"]) / 2,
+    )
+    # all-in mid should equal mid + forward points
+    max_allin_err = _max_abs_mismatch(
+        df, actual="mid_all_in", needs=("mid_all_in", "mid", "mid_fp"),
+        expected=lambda p: df[f"{p}_mid"] + df[f"{p}_mid_fp"],
+    )
 
-    bad = crossed | hl | nonpos | nan_row
     stats = {
-        "n_raw": n_raw, "n_dup_ts": n_dup,
-        "n_crossed": int(crossed.sum()), "n_high_lt_low": int(hl.sum()),
-        "n_nonpositive": int(nonpos.sum()), "n_nan": int(nan_row.sum()),
-        "n_dropped": int(bad.sum()), "n_kept": int((~bad).sum()),
-        "max_mid_err": _max_abs(mid_errs), "max_allin_err": _max_abs(allin_errs),
+        "n_raw": n_raw_rows,
+        "n_dup_ts": n_duplicates,
+        "n_crossed": int(problems["crossed"].sum()),
+        "n_high_lt_low": int(problems["high_lt_low"].sum()),
+        "n_nonpositive": int(problems["nonpositive"].sum()),
+        "n_nan": int(problems["nan"].sum()),
+        "n_dropped": int(is_bad.sum()),
+        "n_kept": int((~is_bad).sum()),
+        "max_mid_err": max_mid_err,
+        "max_allin_err": max_allin_err,
     }
-    out = raw.loc[~bad, KEEP_COLS].reset_index(drop=True)
-    return out, stats
+
+    clean = df.loc[~is_bad, KEEP_COLS].reset_index(drop=True)
+    return clean, stats
 
 
-# --------------------------------------------------------------------------
-# Features
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 4. Derived features
+# ==========================================================================
+
+BASIS_POINTS = 1e4  # 1 basis point (bp) = 0.01%
+
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add derived features to a time-sorted, de-duplicated per-instrument frame."""
+    """Add derived columns to one instrument's bars (sorted, no duplicate times).
+
+    Prices are turned into basis points so instruments are comparable.
+    """
     df = df.sort_values("timestamp").reset_index(drop=True)
     ts = df["timestamp"]
-    dt_min = ts.diff().dt.total_seconds() / 60.0
-    df["dt_prev_min"] = dt_min.fillna(1.0)
-    df["is_gap"] = df["dt_prev_min"] > 1.0
-    df["log_dt_prev"] = 8.0 * np.log1p(df["dt_prev_min"] * 60.0 / 8.0)
+    close = df["close_mid"]
+    open_ = df["open_mid"]
+    high = df["high_mid"]
+    low = df["low_mid"]
 
-    c, o, h, l = df["close_mid"], df["open_mid"], df["high_mid"], df["low_mid"]
-    df["ret_bp"] = (np.log(c).diff() * 1e4).fillna(0.0)
-    df["ret_oc_bp"] = np.log(c / o) * 1e4
-    df["range_bp"] = np.log(h / l) * 1e4
-    df["ret_across_gap"] = df["is_gap"]
+    # --- Time between bars --------------------------------------------------
+    minutes_since_prev = ts.diff().dt.total_seconds() / 60.0
+    df["dt_prev_min"] = minutes_since_prev.fillna(1.0)  # first bar: assume normal 1 min
+    df["is_gap"] = df["dt_prev_min"] > 1.0               # one or more bars missing
+    # Gap length squashed so long gaps don't dominate: about equal to the gap
+    # in seconds for short gaps, growing only logarithmically for long ones.
+    seconds_since_prev = df["dt_prev_min"] * 60.0
+    df["log_dt_prev"] = 8.0 * np.log1p(seconds_since_prev / 8.0)
 
-    df["spread_bp"] = (df["close_ask"] - df["close_bid"]) / c * 1e4
-    df["fp_bp"] = df["close_mid_fp"] / c * 1e4
-    df["dfp_bp"] = df["fp_bp"].diff().fillna(0.0)
+    # --- Returns (bp) ---------------------------------------------------------
+    df["ret_bp"] = (np.log(close).diff() * BASIS_POINTS).fillna(0.0)  # close-to-close
+    df["ret_oc_bp"] = np.log(close / open_) * BASIS_POINTS             # within the bar
+    df["range_bp"] = np.log(high / low) * BASIS_POINTS                 # bar high-low range
+    df["ret_across_gap"] = df["is_gap"]  # ret_bp spans missing bars
 
-    sd = df["settlement_date"]
-    roll = sd.ne(sd.shift()) & sd.shift().notna()
-    df["is_settle_roll"] = roll
-    day = ts.dt.tz_convert("UTC").dt.tz_localize(None).dt.normalize()
-    df["days_to_settle"] = (sd - day).dt.days.astype("int32")
-    # minutes since the most recent roll bar; the first bar anchors the clock
-    anchor = ts.where(roll)
-    anchor.iloc[0] = ts.iloc[0] if pd.isna(anchor.iloc[0]) else anchor.iloc[0]
-    df["min_since_roll"] = (ts - anchor.ffill()).dt.total_seconds() / 60.0
+    # --- Spread and forward points (bp of the close) --------------------------
+    df["spread_bp"] = (df["close_ask"] - df["close_bid"]) / close * BASIS_POINTS
+    df["fp_bp"] = df["close_mid_fp"] / close * BASIS_POINTS
+    df["dfp_bp"] = df["fp_bp"].diff().fillna(0.0)  # change in forward points
 
+    # --- Settlement date ------------------------------------------------------
+    settle = df["settlement_date"]
+    previous_settle = settle.shift()
+    # A "roll" is a bar whose settlement date differs from the bar before it.
+    is_roll = settle.ne(previous_settle) & previous_settle.notna()
+    df["is_settle_roll"] = is_roll
+
+    bar_day = ts.dt.tz_convert("UTC").dt.tz_localize(None).dt.normalize()
+    df["days_to_settle"] = (settle - bar_day).dt.days.astype("int32")
+
+    # Minutes since the latest roll. Mark the time of each roll bar, treat the
+    # very first bar as a roll too (so the clock has a starting point), then
+    # carry each roll time forward to the bars after it.
+    last_roll_time = ts.where(is_roll)
+    if pd.isna(last_roll_time.iloc[0]):
+        last_roll_time.iloc[0] = ts.iloc[0]
+    last_roll_time = last_roll_time.ffill()
+    df["min_since_roll"] = (ts - last_roll_time).dt.total_seconds() / 60.0
+
+    # --- Calendar (UTC) -------------------------------------------------------
     df["hour"] = ts.dt.hour.astype("int8")
     df["minute_of_day"] = (ts.dt.hour * 60 + ts.dt.minute).astype("int16")
-    df["dow"] = ts.dt.day_of_week.astype("int8")
-    df["dom"] = ts.dt.day.astype("int8")
-    df["date"] = (ts.dt.year * 10000 + ts.dt.month * 100 + ts.dt.day).astype("int32")
+    df["dow"] = ts.dt.day_of_week.astype("int8")  # Monday = 0
+    df["dom"] = ts.dt.day.astype("int8")          # day of month
+    df["date"] = (ts.dt.year * 10000 + ts.dt.month * 100 + ts.dt.day).astype("int32")  # YYYYMMDD
     return df
 
 
-# --------------------------------------------------------------------------
-# Loading everything
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 5. Loading everything
+# ==========================================================================
+
+def _load_one_file(src: Source) -> Tuple[Optional[pd.DataFrame], dict]:
+    """Read one source. Returns (day frame or None, manifest row). Never raises."""
+    meta = src.meta
+    row = {
+        "instrument_id": meta.instrument_id,
+        "date": meta.date,
+        "source": src.source,
+        "status": "ok",
+        "error": "",
+    }
+    try:
+        day_df, stats = read_day(src.read_bytes(), meta)
+    except Exception as e:  # noqa: BLE001 - deliberate: one bad file must not stop the run
+        row.update(status="error", error=f"{type(e).__name__}: {e}")
+        return None, row
+
+    row.update(stats)
+    if len(day_df) == 0:
+        row.update(status="error", error="no usable rows")
+        return None, row
+    return day_df, row
+
+
+def _print_summary(series: Dict[str, pd.DataFrame], manifest: pd.DataFrame, n_skipped: int) -> None:
+    """Print a one-line total, one line per instrument, then any errors."""
+    n_files = len(manifest)
+    is_error = manifest["status"] == "error" if n_files else pd.Series(dtype=bool)
+    n_errors = int(is_error.sum()) if n_files else 0
+
+    print(f"{n_files} files loaded ({n_errors} errors), "
+          f"{n_skipped} duplicates skipped, {len(series)} instruments")
+
+    for instrument_id, df in series.items():
+        first_day = df["timestamp"].iloc[0]
+        last_day = df["timestamp"].iloc[-1]
+        print(f"  {instrument_id:<36} days={df['date'].nunique():>3}  bars={len(df):>8,}  "
+              f"{first_day:%Y-%m-%d} -> {last_day:%Y-%m-%d}")
+
+    if n_errors:
+        for _, failed in manifest[is_error].iterrows():
+            print(f"  ERROR {failed['source']}: {failed['error']}", file=sys.stderr)
+
 
 def load_all(paths, verbose: bool = True) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
-    """Load all instruments found under `paths`.
+    """Load every instrument found under `paths`.
 
-    Returns ({instrument_id: DataFrame}, manifest). One bad file never aborts the
-    run: it is recorded in the manifest with status="error".
+    Returns (series, manifest):
+      series   {instrument_id: DataFrame of all its bars, with features}
+      manifest one row per file read, with its quality stats. Files that
+               failed have status="error" and a message; they never stop the run.
     """
     skipped: List[Tuple[FileMeta, str]] = []
-    rows: List[dict] = []
-    frames: Dict[str, List[pd.DataFrame]] = {}
-    metas: Dict[str, FileMeta] = {}
+    manifest_rows: List[dict] = []
+    days_by_instrument: Dict[str, List[pd.DataFrame]] = {}
+    meta_by_instrument: Dict[str, FileMeta] = {}
 
     for src in discover(paths, skipped):
-        m = src.meta
-        row = {"instrument_id": m.instrument_id, "date": m.date, "source": src.source,
-               "status": "ok", "error": ""}
-        try:
-            day_df, stats = read_day(src.read_bytes(), m)
-            row.update(stats)
-            if len(day_df):
-                frames.setdefault(m.instrument_id, []).append(day_df)
-                metas[m.instrument_id] = m
-            else:
-                row.update(status="error", error="no usable rows")
-        except Exception as e:  # noqa: BLE001 - deliberate: keep going
-            row.update(status="error", error=f"{type(e).__name__}: {e}")
-        rows.append(row)
+        day_df, row = _load_one_file(src)
+        manifest_rows.append(row)
+        if day_df is not None:
+            instrument_id = src.meta.instrument_id
+            days_by_instrument.setdefault(instrument_id, []).append(day_df)
+            meta_by_instrument[instrument_id] = src.meta
 
     series: Dict[str, pd.DataFrame] = {}
-    for iid in sorted(frames):
-        df = pd.concat(frames[iid], ignore_index=True)
+    for instrument_id in sorted(days_by_instrument):
+        df = pd.concat(days_by_instrument[instrument_id], ignore_index=True)
         df = df.sort_values("timestamp")
-        df = df[~df["timestamp"].duplicated(keep="first")]
+        df = df[~df["timestamp"].duplicated(keep="first")]  # days may overlap at midnight
         df = add_features(df)
-        df.attrs.update(metas[iid].attrs())
-        series[iid] = df
+        df.attrs.update(meta_by_instrument[instrument_id].attrs())
+        series[instrument_id] = df
 
-    manifest = pd.DataFrame(rows)
+    manifest = pd.DataFrame(manifest_rows)
     if verbose:
-        print(f"{len(rows)} files loaded ({int((manifest['status'] == 'error').sum()) if rows else 0} errors), "
-              f"{len(skipped)} duplicates skipped, {len(series)} instruments")
-        for iid, df in series.items():
-            print(f"  {iid:<36} days={df['date'].nunique():>3}  bars={len(df):>8,}  "
-                  f"{df['timestamp'].iloc[0]:%Y-%m-%d} -> {df['timestamp'].iloc[-1]:%Y-%m-%d}")
-        if rows and (manifest["status"] == "error").any():
-            for _, r in manifest[manifest["status"] == "error"].iterrows():
-                print(f"  ERROR {r['source']}: {r['error']}", file=sys.stderr)
+        _print_summary(series, manifest, len(skipped))
     return series, manifest
 
 
-# --------------------------------------------------------------------------
-# Splits
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 6. Train / validation / test splits
+# ==========================================================================
 
 def time_split(df: pd.DataFrame, n_val_days: int = 6, n_test_days: int = 7,
                embargo_min: int = 60) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Chronological train | val | test split by UTC day.
+    """Split one instrument by UTC day into (train, val, test), oldest first.
 
-    The last `n_test_days` days are test, the `n_val_days` before are val, the rest
-    train. The final `embargo_min` minutes of train and of val are dropped, so a
-    target looking up to `embargo_min` ahead never reaches into the next split.
+        [ train ...... ][gap][ val ... ][gap][ test ... ]
+                         ^ embargo_min    ^ embargo_min
+
+    The last `n_test_days` days are test and the `n_val_days` before them are
+    val; everything earlier is train. The last `embargo_min` minutes of train
+    and of val are dropped, so a target that looks up to `embargo_min` minutes
+    ahead never peeks into the next split.
     """
-    day = df["timestamp"].dt.tz_convert("UTC").dt.normalize()
-    days = day.drop_duplicates().sort_values().tolist()
-    if len(days) <= n_val_days + n_test_days:
-        raise ValueError(f"need more than {n_val_days + n_test_days} days, have {len(days)}")
-    val_start = days[-(n_val_days + n_test_days)]
-    test_start = days[-n_test_days]
-    emb = pd.Timedelta(minutes=embargo_min)
+    bar_day = df["timestamp"].dt.tz_convert("UTC").dt.normalize()
+    all_days = bar_day.drop_duplicates().sort_values().tolist()
+    if len(all_days) <= n_val_days + n_test_days:
+        raise ValueError(f"need more than {n_val_days + n_test_days} days, have {len(all_days)}")
+
+    val_start = all_days[-(n_val_days + n_test_days)]
+    test_start = all_days[-n_test_days]
+    embargo = pd.Timedelta(minutes=embargo_min)
     ts = df["timestamp"]
-    parts = (
-        df[ts < val_start - emb],
-        df[(ts >= val_start) & (ts < test_start - emb)],
-        df[ts >= test_start],
-    )
-    out = []
-    for p in parts:
-        p = p.reset_index(drop=True)
-        p.attrs.update(df.attrs)
-        out.append(p)
-    return tuple(out)  # type: ignore[return-value]
+
+    train = df[ts < val_start - embargo]
+    val = df[(ts >= val_start) & (ts < test_start - embargo)]
+    test = df[ts >= test_start]
+
+    result = []
+    for part in (train, val, test):
+        part = part.reset_index(drop=True)
+        part.attrs.update(df.attrs)  # keep instrument info on each split
+        result.append(part)
+    return tuple(result)  # type: ignore[return-value]
+
+
+def _pair_of(instrument_id: str) -> str:
+    """"EURUSD_EUR_FWD_1M_1000000" -> "EURUSD"."""
+    return instrument_id.split("_")[0]
 
 
 def split_instruments(series, holdout_pairs: Iterable[str]) -> Tuple[List[str], List[str]]:
-    """Split instrument ids into (pretrain, holdout); a held-out pair takes all its
-    tenors/notionals with it. `series` may be the load_all dict or any iterable of ids."""
-    holdout = {p.upper() for p in holdout_pairs}
-    ids = sorted(series.keys() if isinstance(series, dict) else series)
-    held = [i for i in ids if i.split("_")[0] in holdout]
-    pre = [i for i in ids if i.split("_")[0] not in holdout]
-    return pre, held
+    """Split instrument ids into (pretrain, holdout) by currency pair.
+
+    Holding out a pair holds out all of its tenors and notionals. `series`
+    can be the dict from load_all() or any iterable of instrument ids.
+    """
+    holdout = {pair.upper() for pair in holdout_pairs}
+    instrument_ids = sorted(series.keys() if isinstance(series, dict) else series)
+
+    pretrain = [i for i in instrument_ids if _pair_of(i) not in holdout]
+    held_out = [i for i in instrument_ids if _pair_of(i) in holdout]
+    return pretrain, held_out
 
 
-# --------------------------------------------------------------------------
-# Persistence
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 7. Saving and loading processed data
+# ==========================================================================
 
-def save_processed(series: Dict[str, pd.DataFrame], manifest: pd.DataFrame, out_dir: str) -> None:
-    os.makedirs(out_dir, exist_ok=True)
-    inst_rows = []
-    for iid, df in series.items():
-        fn = f"{iid}.parquet"
-        df.to_parquet(os.path.join(out_dir, fn), index=False)
-        inst_rows.append({**df.attrs, "instrument_id": iid, "file": fn,
-                          "n_days": int(df["date"].nunique()), "n_bars": len(df),
-                          "start": df["timestamp"].iloc[0].isoformat(),
-                          "end": df["timestamp"].iloc[-1].isoformat()})
-    pd.DataFrame(inst_rows).to_csv(os.path.join(out_dir, "instruments.csv"), index=False)
-    manifest.to_csv(os.path.join(out_dir, "manifest.csv"), index=False)
-
-
+# Instrument fields stored in instruments.csv and restored onto df.attrs.
 _ATTR_KEYS = ["pair", "base", "quote", "dealt", "product", "tenor", "notional", "instrument_id"]
 
 
+def save_processed(series: Dict[str, pd.DataFrame], manifest: pd.DataFrame, out_dir: str) -> None:
+    """Write the output of load_all() to `out_dir`.
+
+    Creates:
+      <instrument_id>.parquet  one file of bars per instrument
+      instruments.csv          one row per instrument (metadata, size, date range)
+      manifest.csv             the per-file manifest
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    instrument_rows = []
+    for instrument_id, df in series.items():
+        filename = f"{instrument_id}.parquet"
+        df.to_parquet(os.path.join(out_dir, filename), index=False)
+        instrument_rows.append({
+            **df.attrs,
+            "instrument_id": instrument_id,
+            "file": filename,
+            "n_days": int(df["date"].nunique()),
+            "n_bars": len(df),
+            "start": df["timestamp"].iloc[0].isoformat(),
+            "end": df["timestamp"].iloc[-1].isoformat(),
+        })
+
+    pd.DataFrame(instrument_rows).to_csv(os.path.join(out_dir, "instruments.csv"), index=False)
+    manifest.to_csv(os.path.join(out_dir, "manifest.csv"), index=False)
+
+
 def load_processed(out_dir: str) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
-    inst = pd.read_csv(os.path.join(out_dir, "instruments.csv"), dtype=str, keep_default_na=False)
+    """Read back what save_processed() wrote. Returns (series, manifest)."""
+    instruments = pd.read_csv(os.path.join(out_dir, "instruments.csv"),
+                              dtype=str, keep_default_na=False)
+
     series: Dict[str, pd.DataFrame] = {}
-    for _, r in inst.iterrows():
-        df = pd.read_parquet(os.path.join(out_dir, r["file"]))
-        df.attrs.update({k: r[k] for k in _ATTR_KEYS})
-        df.attrs["notional"] = int(r["notional"])
-        series[r["instrument_id"]] = df
+    for _, info in instruments.iterrows():
+        df = pd.read_parquet(os.path.join(out_dir, info["file"]))
+        df.attrs.update({key: info[key] for key in _ATTR_KEYS})
+        df.attrs["notional"] = int(info["notional"])  # read as text; restore the number
+        series[info["instrument_id"]] = df
+
     manifest = pd.read_csv(os.path.join(out_dir, "manifest.csv"))
     if "error" in manifest:
-        manifest["error"] = manifest["error"].fillna("")
+        manifest["error"] = manifest["error"].fillna("")  # empty messages come back as NaN
     return series, manifest
 
 
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
+# ==========================================================================
+# Command line
+# ==========================================================================
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Load raw FX-forward bars and write processed parquet.")
-    ap.add_argument("paths", nargs="+", help="input dirs/CSVs/zips ... followed by the output dir")
-    ap.add_argument("-q", "--quiet", action="store_true")
-    args = ap.parse_args(argv)
+    """Load raw inputs and write processed parquet. Returns the exit code."""
+    parser = argparse.ArgumentParser(description="Load raw FX-forward bars and write processed parquet.")
+    parser.add_argument("paths", nargs="+", help="input dirs/CSVs/zips ... followed by the output dir")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    args = parser.parse_args(argv)
+
     if len(args.paths) < 2:
-        ap.error("need at least one input and an output directory")
+        parser.error("need at least one input and an output directory")
     *inputs, out_dir = args.paths
+
     series, manifest = load_all(inputs, verbose=not args.quiet)
     if not series:
         print("no data found", file=sys.stderr)
         return 1
+
     save_processed(series, manifest, out_dir)
     print(f"saved {len(series)} instruments to {out_dir}")
     return 0
