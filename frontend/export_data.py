@@ -42,6 +42,8 @@ def main() -> int:
         "vol_bp": g["vol_bp"].mean(),
         # net trades in the bucket, clipped to buy/sell/nothing
         "action": g["action"].sum().clip(-1, 1),
+        # realised vol over the same next-H minutes the prediction is for
+        "true_vol_bp": g["actual_vol_bp"].mean() if "actual_vol_bp" in df else g["vol_bp"].mean() * float("nan"),
     }).reset_index()
 
     times = sorted(agg["bucket"].unique())
@@ -50,7 +52,7 @@ def main() -> int:
         "timestamps": [pd.Timestamp(t).isoformat() for t in times],
         "instruments": [],
         "vol_kind": vol_kind,
-        "score": {}, "action": {}, "close_mid": {}, "vol": {},
+        "score": {}, "action": {}, "close_mid": {}, "vol": {}, "true_vol": {},
     }
     for inst, sub in agg.groupby("instrument_id"):
         sub = sub.set_index("bucket").reindex(times)
@@ -58,6 +60,7 @@ def main() -> int:
         out["score"][inst] = [None if pd.isna(v) else round(float(v), 4) for v in sub["score"]]
         out["action"][inst] = [0 if pd.isna(v) else int(v) for v in sub["action"]]
         out["vol"][inst] = [None if pd.isna(v) else round(float(v), 3) for v in sub["vol_bp"]]
+        out["true_vol"][inst] = [None if pd.isna(v) else round(float(v), 3) for v in sub["true_vol_bp"]]
         out["close_mid"][inst] = [None if pd.isna(v) else round(float(v), 6) for v in sub["close_mid"]]
 
     Path(args.out).write_text(json.dumps(out, separators=(",", ":")))

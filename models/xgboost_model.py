@@ -120,10 +120,21 @@ def baseline_prediction(features: pd.DataFrame, target: str, horizon: int) -> pd
 # Dataset
 # ==========================================================================
 
-def build_dataset(series: Dict[str, pd.DataFrame], target: str,
-                  horizon: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Stack every instrument's rows into (train, val, test), split by time."""
+def build_dataset(series: Dict[str, pd.DataFrame], target: str, horizon: int,
+                  extra_train: Optional[Dict[str, pd.DataFrame]] = None,
+                  ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Stack every instrument's rows into (train, val, test), split by time.
+
+    `extra_train` series (e.g. Yahoo spot history) go wholly into train, so val
+    and test stay on `series` and scores remain comparable with and without it.
+    """
     parts: Dict[str, List[pd.DataFrame]] = {"train": [], "val": [], "test": []}
+    for df in (extra_train or {}).values():
+        rows = build_features(df)
+        rows["timestamp"] = df["timestamp"]
+        rows["y"] = make_target(df, target, horizon)
+        rows["baseline"] = baseline_prediction(rows, target, horizon)
+        parts["train"].append(rows.dropna(subset=["y"]))
 
     for df in series.values():
         if target == "vol" and len(series) > 1 and df.attrs["tenor"] != VOL_TENOR:

@@ -67,9 +67,13 @@ def build_direction_rows(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return rows
 
 
-def direction_dataset(series: Dict[str, pd.DataFrame], horizon: int):
-    """(train, val, test) for the direction model; one tenor per pair, like vol."""
+def direction_dataset(series: Dict[str, pd.DataFrame], horizon: int,
+                      extra_train: Optional[Dict[str, pd.DataFrame]] = None):
+    """(train, val, test) for the direction model; one tenor per pair, like vol.
+    `extra_train` series go wholly into train (see build_dataset)."""
     parts = {"train": [], "val": [], "test": []}
+    for df in (extra_train or {}).values():
+        parts["train"].append(build_direction_rows(df, horizon).dropna(subset=["fwd_ret_bp"]))
     for df in series.values():
         if len(series) > 1 and df.attrs["tenor"] != VOL_TENOR:
             continue
@@ -227,7 +231,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               f"{r['signal']:<5} p_up={r['p_up']:.3f} exp={r['expected_move_bp']:+.2f}bp "
               f"spread={r['pred_spread_bp']:.2f}bp")
     if args.export:
-        cols = ["instrument_id", "timestamp", "close_mid", "score", "action", "pred_vol_bp"]
+        cols = ["instrument_id", "timestamp", "close_mid", "score", "action", "pred_vol_bp", "actual_vol_bp"]
         rows.sort_values(["instrument_id", "timestamp"])[cols].to_csv(args.export, index=False)
         print(f"\nexported {len(rows):,} rows to {args.export}")
     if args.save:

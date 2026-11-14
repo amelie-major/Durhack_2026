@@ -49,6 +49,8 @@
   #legend .bar { flex: 1; height: 8px; border-radius: 4px;
                  background: linear-gradient(90deg, var(--sell), var(--neutral), var(--buy)); }
   body.vol #legend .bar { background: linear-gradient(90deg, var(--vol-lo), var(--vol-hi)); }
+  body.acc #legend .bar { background: linear-gradient(90deg, var(--buy), var(--neutral)); }
+  #spark path.true { stroke: var(--buy); stroke-dasharray: 3 2; }
   .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
   .seg button { border: 0; border-radius: 0; }
   .seg button.on { background: var(--accent); color: #fff; }
@@ -75,7 +77,7 @@
 <body>
 <header>
   <h1>FX Signal Map</h1>
-  <div class="seg" id="mode"><button data-m="signal" class="on">Signal</button><button data-m="vol">Volatility</button></div>
+  <div class="seg" id="mode"><button data-m="signal" class="on">Signal</button><button data-m="vol">Volatility</button><button data-m="acc">Accuracy</button></div>
   <label>Warn at <select id="warnk">
     <option value="1.5">1.5× normal vol</option><option value="2" selected>2× normal vol</option>
     <option value="3">3× normal vol</option><option value="Infinity">off</option></select></label>
@@ -119,10 +121,21 @@ const color = s => s == null ? css("--neutral")
 let mode = "signal", volScale;
 const volColor = v => v == null ? css("--neutral")
   : d3.interpolateRgb(css("--vol-lo"), css("--vol-hi"))(volScale(v));
+// Accuracy: relative error of predicted vs realised (true) vol over the same
+// next-H minutes. 0 = perfect (green), fading to grey at ACC_MAX and beyond.
+const ACC_MAX = 0.5;
+const accErr = (i, k) => {
+  const p = data.vol[i.id][k], tv = data.true_vol && data.true_vol[i.id][k];
+  return p == null || tv == null || tv <= 0 ? null : Math.abs(p - tv) / tv;
+};
+const accColor = e => e == null ? css("--land-hi")
+  : d3.interpolateRgb(css("--buy"), css("--neutral"))(Math.min(e / ACC_MAX, 1));
 // Value + colour for the current mode.
-const val = (i, k) => i ? (mode === "vol" ? data.vol[i.id][k] : data.score[i.id][k]) : null;
-const col = v => mode === "vol" ? volColor(v) : color(v);
-const fmt = v => v == null ? "–" : mode === "vol" ? v.toFixed(2) + "bp" : v.toFixed(2);
+const val = (i, k) => !i ? null : mode === "vol" ? data.vol[i.id][k]
+  : mode === "acc" ? accErr(i, k) : data.score[i.id][k];
+const col = v => mode === "vol" ? volColor(v) : mode === "acc" ? accColor(v) : color(v);
+const fmt = v => v == null ? (mode === "acc" ? "pending" : "–")
+  : mode === "vol" ? v.toFixed(2) + "bp" : mode === "acc" ? (v * 100).toFixed(0) + "% off" : v.toFixed(2);
 // Live mode: the live server rebuilds data.json every minute; re-fetch it.
 async function refresh() {
   try {
@@ -237,8 +250,10 @@ function init(world) {
     mode = e.target.dataset.m;
     d3.selectAll("#mode button").classed("on", function () { return this.dataset.m === mode; });
     document.body.classList.toggle("vol", mode === "vol");
-    document.getElementById("lg-lo").textContent = mode === "vol" ? lo.toFixed(2) + "bp" : "Sell";
-    document.getElementById("lg-hi").textContent = mode === "vol" ? hi.toFixed(2) + "bp" : "Buy";
+    document.body.classList.toggle("acc", mode === "acc");
+    const lg = { vol: [lo.toFixed(2) + "bp", hi.toFixed(2) + "bp"], acc: ["Perfect", `≥${ACC_MAX * 100}% off`] }[mode] || ["Sell", "Buy"];
+    document.getElementById("lg-lo").textContent = lg[0];
+    document.getElementById("lg-hi").textContent = lg[1];
     render();
   });
   selected = pairs[0];
@@ -310,19 +325,26 @@ function render() {
     ? `<div class="banner">⚠ High volatility: ${ratio(selected).toFixed(1)}× this instrument's normal level</div>` : "") + `
     <div class="row"><span>Score (P buy)</span><span>${s == null ? "–" : s.toFixed(3)}</span></div>
     <div class="row"><span>${data.vol_kind === "predicted" ? "Predicted vol, next 10 min (bp)" : "Realised vol (bp/min)"}</span><span>${data.vol ? (data.vol[i.id][t] ?? "–") : "–"}</span></div>
+    ${mode === "acc" ? `<div class="row"><span>True vol, same 10 min (bp)</span><span>${data.true_vol?.[i.id][t] ?? "pending"}</span></div>
+    <div class="row"><span>Error</span><span style="color:${accColor(accErr(i, t))}">${fmt(accErr(i, t))}</span></div>
+    <div class="row"><span>Mean error, all times</span><span>${(() => { const e = data.timestamps.map((_, k) => accErr(i, k)).filter(v => v != null);
+      return e.length ? (d3.mean(e) * 100).toFixed(0) + "%" : "–"; })()}</span></div>` : ""}
     <div class="row"><span>Action</span><span>${lab}</span></div>
     <div class="row"><span>Close mid</span><span>${cm ?? "–"}</span></div>
     <div class="row"><span>Trades so far</span><span>${data.action[i.id].slice(0, t + 1).filter(a => a).length}</span></div>`);
 
   const sp = d3.select("#spark"), sw = sp.node().clientWidth || 270, sh = 80;
   sp.attr("viewBox", `0 0 ${sw} ${sh}`);
-  const x = d3.scaleLinear([0, data.timestamps.length - 1], [0, sw]), y = mode === "vol"
-    ? d3.scaleLinear([0, d3.max(data.vol[i.id]) || 1], [sh - 2, 2])
+  const tv = (data.true_vol && data.true_vol[i.id]) || [];
+  const x = d3.scaleLinear([0, data.timestamps.length - 1], [0, sw]), y = mode === "vol" || mode === "acc"
+    ? d3.scaleLinear([0, d3.max([...data.vol[i.id], ...(mode === "acc" ? tv : [])]) || 1], [sh - 2, 2])
     : d3.scaleLinear([0, 1], [sh - 2, 2]);
-  const series = mode === "vol" ? data.vol[i.id] : data.score[i.id];
+  const series = mode === "signal" ? data.score[i.id] : data.vol[i.id];
   sp.selectAll("*").remove();
   if (mode === "signal") sp.append("line").attr("x1", 0).attr("x2", sw).attr("y1", y(.5)).attr("y2", y(.5));
   sp.append("path").attr("d", d3.line().defined(v => v != null).x((v, k) => x(k)).y(v => y(v))(series));
+  if (mode === "acc") sp.append("path").attr("class", "true")
+    .attr("d", d3.line().defined(v => v != null).x((v, k) => x(k)).y(v => y(v))(tv));
   sp.append("line").attr("class", "cursor").attr("x1", x(t)).attr("x2", x(t)).attr("y1", 0).attr("y2", sh);
 }
 </script>
