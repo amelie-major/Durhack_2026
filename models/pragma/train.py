@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from loader import load_processed
 from models.xgboost_model import MAX_HORIZON
@@ -59,6 +60,24 @@ def lr_at(step: int, total_steps: int, peak: float, warmup: int) -> float:
         return peak * (step + 1) / warmup
     progress = (step - warmup) / max(1, total_steps - warmup)
     return peak * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+def check_finite(loss: torch.Tensor, step: int, stage: str, debug: bool, batch=None) -> float:
+    """Fail loudly (with context) the moment the loss goes NaN/inf."""
+    value = loss.item()
+    if not math.isfinite(value):
+        msg = f"{stage}: non-finite loss ({value}) at step {step + 1}"
+        if batch is not None:
+            msg += "  batch shapes: " + ", ".join(
+                f"{k}={tuple(v.shape)}" for k, v in batch.items() if hasattr(v, "shape"))
+        raise FloatingPointError(msg)
+    return value
+
+
+def clip_and_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> float:
+    grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+    optimizer.step()
+    return grad_norm
 
 
 def make_optimizer(model: Pragma, cfg: Config, lr: float) -> torch.optim.Optimizer:
@@ -173,27 +192,37 @@ def pretrain(args) -> None:
                     losses.append(masked_loss(model, batch, cfg, generator, 0.0).item())
         return float(np.mean(losses))
 
+    if args.debug:
+        torch.autograd.set_detect_anomaly(True)
     generator = torch.Generator().manual_seed(cfg.seed)
     started, recent = time.time(), []
-    for step in range(cfg.pretrain_steps):
+    bar = tqdm(range(cfg.pretrain_steps), desc="pretrain", unit="step", dynamic_ncols=True)
+    for step in bar:
         model.train()
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step, cfg.pretrain_steps, cfg.lr, cfg.warmup_steps)
         batch = bars.batch(rng.choice(train_ends, cfg.batch_size), cfg.context, device)
         with autocast(device):
             loss = masked_loss(model, batch, cfg, generator, cfg.label_smoothing)
+        recent.append(check_finite(loss, step, "pretrain", args.debug, batch))
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        recent.append(loss.item())
+        grad_norm = clip_and_step(model, optimizer)
+        bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
+                        gnorm=f"{grad_norm:.2f}", refresh=False)
+        if args.debug and step < 3:
+            tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
+                       f"{grad_norm:.3f}  batch " + ", ".join(
+                           f"{k}={tuple(v.shape)}" for k, v in batch.items()
+                           if hasattr(v, "shape")))
 
         if (step + 1) % cfg.eval_every == 0 or step + 1 == cfg.pretrain_steps:
-            print(f"step {step + 1:>6}/{cfg.pretrain_steps}  train {np.mean(recent):.3f} "
-                  f"(smoothed labels)  val {validation_loss():.3f}  "
-                  f"{time.time() - started:.0f}s", flush=True)
+            tqdm.write(f"step {step + 1:>6}/{cfg.pretrain_steps}  train {np.mean(recent):.3f} "
+                       f"(smoothed labels)  val {validation_loss():.3f}  "
+                       f"{time.time() - started:.0f}s")
             recent = []
             save_checkpoint(args.checkpoint, model, tokenizer, cfg)
+    bar.close()
     print(f"saved {args.checkpoint}")
 
 
@@ -236,8 +265,11 @@ def finetune(args) -> None:
 
     optimizer = make_optimizer(model, cfg, cfg.finetune_lr)
     best_rmse, best_state, evals_since_best = float("inf"), None, 0
+    if args.debug:
+        torch.autograd.set_detect_anomaly(True)
     started, recent = time.time(), []
-    for step in range(cfg.finetune_steps):
+    bar = tqdm(range(cfg.finetune_steps), desc="finetune", unit="step", dynamic_ncols=True)
+    for step in bar:
         model.train()
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step, cfg.finetune_steps, cfg.finetune_lr, cfg.warmup_steps)
@@ -245,17 +277,21 @@ def finetune(args) -> None:
         batch = bars.batch(train_ends[picks], cfg.context, device)
         with autocast(device):
             loss = F.mse_loss(model(batch).float(), train_z[picks].to(device))
+        recent.append(check_finite(loss, step, "finetune", args.debug, batch))
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        recent.append(loss.item())
+        grad_norm = clip_and_step(model, optimizer)
+        bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
+                        gnorm=f"{grad_norm:.2f}", refresh=False)
+        if args.debug and step < 3:
+            tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
+                       f"{grad_norm:.3f}")
 
         if (step + 1) % cfg.eval_every == 0 or step + 1 == cfg.finetune_steps:
             val_rmse = rmse(val_y, predict(val_ends))
             train_rmse = y_std * math.sqrt(np.mean(recent))
-            print(f"step {step + 1:>6}/{cfg.finetune_steps}  train RMSE {train_rmse:.4f}  "
-                  f"val RMSE {val_rmse:.4f}  {time.time() - started:.0f}s", flush=True)
+            tqdm.write(f"step {step + 1:>6}/{cfg.finetune_steps}  train RMSE {train_rmse:.4f}  "
+                       f"val RMSE {val_rmse:.4f}  {time.time() - started:.0f}s")
             recent = []
             if val_rmse < best_rmse:
                 best_rmse, evals_since_best = val_rmse, 0
@@ -263,9 +299,12 @@ def finetune(args) -> None:
             else:
                 evals_since_best += 1
                 if evals_since_best >= cfg.patience:
-                    print("validation stopped improving; stopping early")
+                    tqdm.write("validation stopped improving; stopping early")
                     break
+    bar.close()
 
+    if best_state is None:
+        raise RuntimeError("no finite validation RMSE was ever recorded; nothing to restore")
     model.load_state_dict(best_state)
     test_pred = predict(rows["test"]["g"].to_numpy())
     print(f"best val RMSE {best_rmse:.4f}  "
@@ -347,6 +386,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = commands.add_parser("probe", help="linear model on frozen embeddings")
     common(sub, with_target=True)
     sub.set_defaults(run=probe)
+
+    for name in ("pretrain", "finetune"):
+        commands.choices[name].add_argument(
+            "--debug", action="store_true",
+            help="anomaly detection + print shapes/grad norms for the first steps")
 
     args = parser.parse_args(argv)
     if getattr(args, "horizon", 1) > MAX_HORIZON or getattr(args, "horizon", 1) < 1:
