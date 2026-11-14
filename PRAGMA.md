@@ -42,6 +42,7 @@ bar tokens ─────> Event encoder ───> one [EVT] vector ──> Hi
 | Preset | Parameters | `d_model` | Heads | Layers (profile / event / history) | Context | Use |
 |---|---|---|---|---|---|---|
 | `gpu` | 3.36M | 192 | 3 | 1 / 2 / 4 | 240 bars | real runs |
+| `colab` | 3.36M | 192 | 3 | 1 / 2 / 4 | 120 bars | free Colab GPU: half the history and 8,000 pre-training steps, roughly a quarter of the `gpu` cost |
 | `smoke` | 0.23M | 64 | 2 | 1 / 1 / 2 | 32 bars | checking the pipeline on a laptop |
 
 ### Where this differs from the paper
@@ -99,6 +100,25 @@ The job creates `.venv-ncc` on first use, pre-trains, then for each target runs 
 | `SKIP_PRETRAIN` | `0` | set to `1` to reuse `runs/pragma/pretrain.pt` |
 
 NCC requires a GPU type in the request. The script asks for `ampere`; override with `sbatch --gres=gpu:turing:1 scripts/ncc_pragma.sh` if none are free. If the job runs out of GPU memory, halve `batch_size` in `models/pragma/config.py`.
+
+### On Colab
+
+Upload the laptop's `data/processed/` folder to Google Drive as `MyDrive/durhack/processed/`, choose a GPU runtime, then run:
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+
+!git clone -b feat/pragma https://github.com/amelie-major/Durhack_2026.git
+%cd Durhack_2026
+!bash scripts/colab_pragma.sh
+```
+
+Checkpoints, predictions and `colab.log` are written to `MyDrive/durhack/runs/`, so they survive the session ending. The script takes the same `TARGETS`, `HORIZON` and `SKIP_PRETRAIN` variables as the NCC one, plus `PRETRAIN_STEPS` and `PRESET` (default `colab`; use `PRESET=gpu` to match the NCC run). For the quickest useful result: `!TARGETS=vol PRETRAIN_STEPS=4000 bash scripts/colab_pragma.sh`.
+
+### Speed
+
+Almost all the time is the GPU's forward and backward pass; loading data and building batches is about 10 ms per step. The levers, largest first: `pretrain_steps`, `context` (cost per step is roughly proportional to it), and which targets you run (spread has nine times the rows of volatility). Mixed precision is chosen per GPU: bf16 on Ampere and newer, fp16 on older tensor-core cards such as the T4, float32 otherwise. The first line of each run prints which one is in use.
 
 ### Individual commands
 
@@ -205,4 +225,5 @@ Which to try first depends on the NCC table:
 | `models/pragma/train.py` | `pretrain`, `finetune`, `probe` |
 | `models/pragma/compare.py` | the table against XGBoost and the baseline |
 | `scripts/ncc_pragma.sh` | SLURM job for NCC |
+| `scripts/colab_pragma.sh` | the same pipeline for a Colab notebook |
 | `tests/test_pragma.py` | tokens, no look-ahead, row parity with XGBoost, shapes |

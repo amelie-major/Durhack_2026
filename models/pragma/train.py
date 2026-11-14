@@ -45,13 +45,42 @@ from .tokenizer import EVENT_KEYS, Tokenizer
 # ==========================================================================
 
 def pick_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True  # faster float32 maths on newer GPUs
+        torch.backends.cudnn.allow_tf32 = True
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def amp_dtype(device: torch.device) -> Optional[torch.dtype]:
+    """Which reduced precision this device runs fast, or None for plain float32.
+
+    bf16 (what the paper uses) is only fast on Ampere and newer cards. Older
+    cards with tensor cores (Colab's T4, V100, RTX 20xx) are fast in fp16 and
+    only *emulate* bf16, slowly. Pascal cards and CPUs gain nothing from either.
+    """
+    if device.type != "cuda":
+        return None
+    generation = torch.cuda.get_device_capability(device)[0]
+    if generation >= 8:
+        return torch.bfloat16
+    return torch.float16 if generation == 7 else None
 
 
 def autocast(device: torch.device):
-    """Mixed precision on GPU (bf16, as in the paper); plain float32 on CPU."""
-    use = device.type == "cuda" and torch.cuda.is_bf16_supported()
-    return torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use)
+    dtype = amp_dtype(device)
+    return torch.autocast(device_type=device.type, dtype=dtype or torch.bfloat16,
+                          enabled=dtype is not None)
+
+
+def make_scaler(device: torch.device) -> "torch.amp.GradScaler":
+    """fp16 needs its gradients rescaled to avoid underflow; other modes do not."""
+    return torch.amp.GradScaler(device.type, enabled=amp_dtype(device) is torch.float16)
+
+
+def describe(device: torch.device) -> str:
+    dtype = amp_dtype(device)
+    return f"device={device} precision={str(dtype).replace('torch.', '') if dtype else 'float32'}"
 
 
 def lr_at(step: int, total_steps: int, peak: float, warmup: int) -> float:
@@ -74,9 +103,15 @@ def check_finite(loss: torch.Tensor, step: int, stage: str, debug: bool, batch=N
     return value
 
 
-def clip_and_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> float:
+def backward_and_step(loss: torch.Tensor, model: torch.nn.Module,
+                      optimizer: torch.optim.Optimizer, scaler) -> float:
+    """Backward pass, gradient clipping and optimiser step. Returns the gradient norm."""
+    optimizer.zero_grad(set_to_none=True)
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)  # so clipping sees the real gradient sizes
     grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
-    optimizer.step()
+    scaler.step(optimizer)
+    scaler.update()
     return grad_norm
 
 
@@ -176,8 +211,9 @@ def pretrain(args) -> None:
 
     model = Pragma(cfg, tokenizer).to(device)
     optimizer = make_optimizer(model, cfg, cfg.lr)
+    scaler = make_scaler(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"device={device}  params={n_params / 1e6:.2f}M  vocab={tokenizer.vocab_size}  "
+    print(f"{describe(device)}  params={n_params / 1e6:.2f}M  vocab={tokenizer.vocab_size}  "
           f"train bars={len(train_ends):,}  context={cfg.context}")
     print(f"no-context loss to beat: {unigram_loss(bars, train_ends):.3f}")
 
@@ -205,9 +241,7 @@ def pretrain(args) -> None:
         with autocast(device):
             loss = masked_loss(model, batch, cfg, generator, cfg.label_smoothing)
         recent.append(check_finite(loss, step, "pretrain", args.debug, batch))
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = clip_and_step(model, optimizer)
+        grad_norm = backward_and_step(loss, model, optimizer, scaler)
         bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
                         gnorm=f"{grad_norm:.2f}", refresh=False)
         if args.debug and step < 3:
@@ -253,7 +287,7 @@ def finetune(args) -> None:
     train_ends, train_y = rows["train"]["g"].to_numpy(), rows["train"]["y"].to_numpy()
     val = rows["val"].iloc[subsample(np.arange(len(rows["val"])), cfg.max_eval_rows, rng)]
     val_ends, val_y = val["g"].to_numpy(), val["y"].to_numpy()
-    print(f"device={device}  target={args.target} horizon={args.horizon}min  rows: "
+    print(f"{describe(device)}  target={args.target} horizon={args.horizon}min  rows: "
           f"train={len(train_ends):,} val={len(rows['val']):,} test={len(rows['test']):,}")
 
     # The network predicts a standardised target; predictions are scaled back.
@@ -264,6 +298,7 @@ def finetune(args) -> None:
         return run_in_chunks(model, bars, ends, cfg, device, model) * y_std + y_mean
 
     optimizer = make_optimizer(model, cfg, cfg.finetune_lr)
+    scaler = make_scaler(device)
     best_rmse, best_state, evals_since_best = float("inf"), None, 0
     if args.debug:
         torch.autograd.set_detect_anomaly(True)
@@ -278,9 +313,7 @@ def finetune(args) -> None:
         with autocast(device):
             loss = F.mse_loss(model(batch).float(), train_z[picks].to(device))
         recent.append(check_finite(loss, step, "finetune", args.debug, batch))
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = clip_and_step(model, optimizer)
+        grad_norm = backward_and_step(loss, model, optimizer, scaler)
         bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
                         gnorm=f"{grad_norm:.2f}", refresh=False)
         if args.debug and step < 3:
@@ -334,7 +367,7 @@ def probe(args) -> None:
     def embed(part: pd.DataFrame) -> np.ndarray:
         return run_in_chunks(model, bars, part["g"].to_numpy(), cfg, device, model.embedding)
 
-    print(f"device={device}  embedding train={len(train):,} val={len(val):,} test={len(test):,}")
+    print(f"{describe(device)}  embedding train={len(train):,} val={len(val):,} test={len(test):,}")
     scaler = StandardScaler().fit(embed(train))
     x_train, x_val = scaler.transform(embed(train)), scaler.transform(embed(val))
 

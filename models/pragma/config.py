@@ -48,6 +48,9 @@ class Config:
 PRESETS = {
     # Real runs, on a GPU.
     "gpu": Config(),
+    # Free Colab GPU (T4): half the history and about half the steps, so
+    # pre-training costs roughly a quarter of "gpu". Expect slightly worse scores.
+    "colab": replace(Config(), context=120, pretrain_steps=8_000, finetune_steps=4_000),
     # Minutes on a laptop CPU. Only proves the pipeline runs end to end.
     "smoke": replace(
         Config(),
