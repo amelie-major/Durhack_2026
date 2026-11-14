@@ -8,13 +8,13 @@
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7280;
     --land: #dde1e7; --land-hi: #b9c3d3; --border: #e3e6eb; --accent: #3b6fd8;
-    --buy: #1a9e5c; --sell: #d14343; --neutral: #9aa3af; --vol-lo: #f3d9a6; --vol-hi: #7a2e8c;
+    --buy: #1a9e5c; --sell: #d14343; --neutral: #9aa3af; --vol-lo: #f3d9a6; --vol-hi: #7a2e8c; --warn: #e8590c; --warn-land: #f8c9a8;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #11141a; --panel: #1a1f28; --text: #e6e9ef; --muted: #9aa3b2;
       --land: #2a303b; --land-hi: #3f4a5c; --border: #2c323d; --accent: #6b9bff;
-      --buy: #34c47c; --sell: #ef5b5b; --neutral: #6b7280; --vol-lo: #4a3f2a; --vol-hi: #e08cff;
+      --buy: #34c47c; --sell: #ef5b5b; --neutral: #6b7280; --vol-lo: #4a3f2a; --vol-hi: #e08cff; --warn: #ff8a3d; --warn-land: #6b3a1f;
     }
   }
   * { box-sizing: border-box; }
@@ -58,6 +58,17 @@
   #spark .cursor { stroke: var(--text); stroke-dasharray: none; }
   #pairs .row { cursor: pointer; }
   #pairs .row:hover { background: var(--bg); }
+  #status { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  #status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--neutral); }
+  #status.on .dot { background: var(--buy); animation: blink 2s infinite; }
+  #status.stale .dot { background: #e0a03a; }
+  @keyframes blink { 50% { opacity: .3; } }
+  .country.warn { fill: var(--warn-land); stroke: var(--warn); stroke-width: .8; }
+  .warn-icon path { fill: var(--warn); stroke: var(--panel); stroke-width: 2; stroke-linejoin: round; }
+  .warn-icon text { fill: #fff; font: 700 15px system-ui; text-anchor: middle; pointer-events: none; }
+  .warn-icon { animation: warnpulse 1.2s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  @keyframes warnpulse { 50% { opacity: .55; } }
+  .banner { background: var(--warn); color: #fff; border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; font-size: 12px; }
   .msg { padding: 40px; text-align: center; color: var(--muted); }
 </style>
 </head>
@@ -65,18 +76,23 @@
 <header>
   <h1>FX Signal Map</h1>
   <div class="seg" id="mode"><button data-m="signal" class="on">Signal</button><button data-m="vol">Volatility</button></div>
+  <label>Warn at <select id="warnk">
+    <option value="1.5">1.5× normal vol</option><option value="2" selected>2× normal vol</option>
+    <option value="3">3× normal vol</option><option value="Infinity">off</option></select></label>
   <label>Tenor <select id="tenor"></select></label>
   <div id="time-wrap">
     <button id="play">▶ Play</button>
     <input id="slider" type="range" min="0" value="0">
     <span id="time"></span>
   </div>
+  <span id="status"></span>
 </header>
 <main>
   <div class="card" id="map"></div>
   <aside>
     <div class="card" id="pairs"><h2>Pairs</h2><div id="pair-list"></div>
       <div id="legend"><span id="lg-lo">Sell</span><div class="bar"></div><span id="lg-hi">Buy</span></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:6px">⚠ = volatility above the chosen multiple of that instrument's median</div>
     </div>
     <div class="card" id="detail" style="margin-top:16px"><h2 id="d-title">Select a pair</h2>
       <div id="d-body"></div><svg id="spark"></svg></div>
@@ -107,15 +123,58 @@ const volColor = v => v == null ? css("--neutral")
 const val = (i, k) => i ? (mode === "vol" ? data.vol[i.id][k] : data.score[i.id][k]) : null;
 const col = v => mode === "vol" ? volColor(v) : color(v);
 const fmt = v => v == null ? "–" : mode === "vol" ? v.toFixed(2) + "bp" : v.toFixed(2);
+// Live mode: the live server rebuilds data.json every minute; re-fetch it.
+async function refresh() {
+  try {
+    const d = await d3.json("data.json?" + Date.now());
+    const atEnd = t >= data.timestamps.length - 1;
+    data = d;
+    const slider = document.getElementById("slider");
+    slider.max = data.timestamps.length - 1;
+    if (atEnd || t > slider.max) t = +slider.max;
+    slider.value = t;
+    render();
+  } catch (e) { console.warn("refresh failed", e); }
+  setStatus();
+}
+function setStatus() {
+  const el = document.getElementById("status");
+  if (!data.live) { el.innerHTML = '<span class="dot"></span>Historical'; return; }
+  const age = (Date.now() - new Date(data.last_bar)) / 60000;
+  el.className = age < 10 ? "on" : "stale";
+  el.innerHTML = `<span class="dot"></span>${age < 10 ? "LIVE" : "Market closed / stale"} · last bar ${
+    new Date(data.last_bar).toISOString().slice(5, 16).replace("T", " ")} UTC`;
+}
+let medCache = { src: null, med: {} };
+function volMedians() {
+  if (medCache.src !== data) {
+    medCache = { src: data, med: {} };
+    for (const [id, a] of Object.entries(data.vol || {})) medCache.med[id] = d3.median(a.filter(v => v != null));
+  }
+  return medCache.med;
+}
 let data, tenor, t = 0, selected = null, timer = null;
 
+// The live server answers 503 until its first fetch is scored; keep retrying.
+async function loadData(tries = 0) {
+  try { return await d3.json("data.json?" + Date.now()); }
+  catch (e) {
+    if (String(e).includes("503") && tries < 60) {
+      document.getElementById("map").innerHTML =
+        `<div class="msg">Fetching live prices and scoring with the models… (${tries * 2}s)</div>`;
+      await new Promise(r => setTimeout(r, 2000));
+      return loadData(tries + 1);
+    }
+    throw e;
+  }
+}
 Promise.all([
-  d3.json("data.json"),
+  loadData(),
   d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json"),
-]).then(([d, world]) => { data = d; init(world); })
+]).then(([d, world]) => { document.getElementById("map").innerHTML = ""; data = d; init(world); })
   .catch(err => {
     document.getElementById("map").innerHTML =
-      `<div class="msg">Couldn't load data.json.<br>Run <code>python frontend/export_data.py</code> then serve with <code>python -m http.server -d frontend</code>.<br><small>${err}</small></div>`;
+      `<div class="msg">Couldn't load data.json.<br>Live: run <code>python -m live.server</code> from the repo root and check its terminal for errors.<br>Historical: <code>python frontend/export_data.py</code> then <code>python -m http.server -d frontend</code>.<br><small>${err}</small></div>`;
   });
 
 function init(world) {
@@ -150,6 +209,8 @@ function init(world) {
   hubs.append("circle").attr("r", 5);
   hubs.append("text").attr("x", 8).attr("y", 4).text(c => c);
   g.append("g").attr("id", "pulses");
+  g.append("g").attr("id", "warns");
+  d3.select("#warnk").on("change", render);
 
   // Controls
   const tenors = [...new Set(data.instruments.map(i => i.tenor))];
@@ -181,6 +242,8 @@ function init(world) {
     render();
   });
   selected = pairs[0];
+  if (data.live) { t = data.timestamps.length - 1; slider.value = t; setInterval(refresh, 60000); }
+  setStatus();
   window.__ctx = { proj, pairs };
   render();
 }
@@ -198,6 +261,27 @@ function render() {
     .attr("stroke-width", p => { const i = instFor(p); return i && data.action[i.id][t] ? 7 : 4; })
     .classed("sel", p => p === selected);
 
+  // Volatility warnings: current vol above k × that instrument's median.
+  const k = +document.getElementById("warnk").value, med = volMedians();
+  const ratio = p => { const i = instFor(p), v = i && data.vol && data.vol[i.id][t];
+                       return v != null && med[i.id] ? v / med[i.id] : null; };
+  const warned = pairs.filter(p => ratio(p) > k);
+  const warnSet = new Set(warned);
+  const hot = new Set(warned.flatMap(p => [p.slice(0, 3), p.slice(3, 6)]));
+  d3.selectAll(".country").classed("warn", d => [...hot].some(c => HUBS[c].countries.includes(d.id)));
+  const mid = p => { const el = d3.selectAll(".arc").filter(q => q === p).node();
+                     const pt = el.getPointAtLength(el.getTotalLength() / 2); return `translate(${pt.x},${pt.y - 4})`; };
+  d3.select("#warns").selectAll("g.warn-icon").data(warned, p => p).join(enter => {
+      const w = enter.append("g").attr("class", "warn-icon").style("cursor", "pointer")
+        .on("click", (e, p) => { selected = p; render(); });
+      w.append("path").attr("d", "M0,-15 L14,10 L-14,10 Z");
+      w.append("text").attr("y", 7).text("!");
+      w.append("title");
+      return w;
+    })
+    .attr("transform", mid)
+    .select("title").text(p => `${p} ${tenor}: volatility ${ratio(p).toFixed(1)}× normal`);
+
   // Pulse ring on the base-currency hub when the model trades.
   const trades = pairs.map(p => ({ p, i: instFor(p) })).filter(d => d.i && data.action[d.i.id][t]);
   d3.select("#pulses").selectAll("circle").data(trades, d => d.p + t).join(
@@ -213,7 +297,7 @@ function render() {
     .html(p => {
       const i = instFor(p); if (!i) return `<span>${p}</span><span>–</span>`;
       const s = val(i, t), [lab, c] = actLabel(data.action[i.id][t]);
-      return `<span>${p} <b style="color:${col(s)}">${fmt(s)}</b></span>
+      return `<span>${warnSet.has(p) ? '<span style="color:var(--warn)">⚠</span> ' : ""}${p} <b style="color:${col(s)}">${fmt(s)}</b></span>
               <span class="pill" style="background:${css(c)}">${lab}</span>`;
     });
 
@@ -222,9 +306,10 @@ function render() {
   document.getElementById("d-title").textContent = i ? i.id : "Select a pair";
   if (!i) { d3.select("#d-body").html("No data for this tenor"); d3.select("#spark").selectAll("*").remove(); return; }
   const s = data.score[i.id][t], cm = data.close_mid[i.id][t], [lab] = actLabel(data.action[i.id][t]);
-  d3.select("#d-body").html(`
+  d3.select("#d-body").html((warnSet.has(selected)
+    ? `<div class="banner">⚠ High volatility: ${ratio(selected).toFixed(1)}× this instrument's normal level</div>` : "") + `
     <div class="row"><span>Score (P buy)</span><span>${s == null ? "–" : s.toFixed(3)}</span></div>
-    <div class="row"><span>Vol (${data.vol_kind || "realised"}, bp/min)</span><span>${data.vol ? (data.vol[i.id][t] ?? "–") : "–"}</span></div>
+    <div class="row"><span>${data.vol_kind === "predicted" ? "Predicted vol, next 10 min (bp)" : "Realised vol (bp/min)"}</span><span>${data.vol ? (data.vol[i.id][t] ?? "–") : "–"}</span></div>
     <div class="row"><span>Action</span><span>${lab}</span></div>
     <div class="row"><span>Close mid</span><span>${cm ?? "–"}</span></div>
     <div class="row"><span>Trades so far</span><span>${data.action[i.id].slice(0, t + 1).filter(a => a).length}</span></div>`);

@@ -65,3 +65,12 @@ python -m http.server -d frontend 8000             # open http://localhost:8000
 ```
 
 Each currency pair is an arc between its two financial centres, coloured by the model score (red = sell, green = buy). Pick a tenor, scrub or play through time, and click a pair for details.
+
+### Live mode
+
+```bash
+python -m live.server          # trains once (~20 s, cached in data/live_models.pkl), then http://localhost:8000
+python -m live.server --retrain
+```
+
+Polls Yahoo Finance 1-minute spot bars for EURUSD, USDJPY and USDSGD every minute and scores all 27 forward instruments with the spread, vol and direction models. The feed has no bid/ask or forward points, so each instrument uses its historical median spread and last forward points. Outside FX hours (Fri 22:00 – Sun 22:00 UTC) the map shows the last available bars and marks them stale.
