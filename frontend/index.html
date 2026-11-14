@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FX Signal Map</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7280;
+    --land: #dde1e7; --land-hi: #b9c3d3; --border: #e3e6eb; --accent: #3b6fd8;
+    --buy: #1a9e5c; --sell: #d14343; --neutral: #9aa3af; --vol-lo: #f3d9a6; --vol-hi: #7a2e8c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11141a; --panel: #1a1f28; --text: #e6e9ef; --muted: #9aa3b2;
+      --land: #2a303b; --land-hi: #3f4a5c; --border: #2c323d; --accent: #6b9bff;
+      --buy: #34c47c; --sell: #ef5b5b; --neutral: #6b7280; --vol-lo: #4a3f2a; --vol-hi: #e08cff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { padding: 14px 20px; display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+           border-bottom: 1px solid var(--border); background: var(--panel); }
+  h1 { font-size: 17px; margin: 0 12px 0 0; }
+  label { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  select, button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+                   background: var(--bg); color: var(--text); cursor: pointer; }
+  #time-wrap { flex: 1; min-width: 240px; display: flex; gap: 10px; align-items: center; }
+  #slider { flex: 1; accent-color: var(--accent); }
+  #time { font-variant-numeric: tabular-nums; min-width: 150px; }
+  main { display: grid; grid-template-columns: 1fr 300px; gap: 16px; padding: 16px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  #map svg { width: 100%; height: auto; display: block; }
+  .country { fill: var(--land); stroke: var(--bg); stroke-width: .5; }
+  .country.hi { fill: var(--land-hi); }
+  .arc { fill: none; stroke-linecap: round; cursor: pointer; transition: stroke .25s, stroke-width .25s; }
+  .arc.sel { filter: drop-shadow(0 0 4px currentColor); }
+  .hub circle { fill: var(--accent); stroke: var(--panel); stroke-width: 1.5; }
+  .hub text { fill: var(--text); font-size: 12px; font-weight: 600; paint-order: stroke;
+              stroke: var(--panel); stroke-width: 3; }
+  .pulse { fill: none; stroke-width: 2; }
+  h2 { font-size: 14px; margin: 0 0 8px; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .row span:first-child { color: var(--muted); }
+  .pill { padding: 1px 8px; border-radius: 10px; color: #fff; font-size: 12px; }
+  #legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-top: 10px; }
+  #legend .bar { flex: 1; height: 8px; border-radius: 4px;
+                 background: linear-gradient(90deg, var(--sell), var(--neutral), var(--buy)); }
+  body.vol #legend .bar { background: linear-gradient(90deg, var(--vol-lo), var(--vol-hi)); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  #spark { width: 100%; height: 80px; margin-top: 10px; }
+  #spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  #spark line { stroke: var(--muted); stroke-dasharray: 2 3; }
+  #spark .cursor { stroke: var(--text); stroke-dasharray: none; }
+  #pairs .row { cursor: pointer; }
+  #pairs .row:hover { background: var(--bg); }
+  .msg { padding: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>FX Signal Map</h1>
+  <div class="seg" id="mode"><button data-m="signal" class="on">Signal</button><button data-m="vol">Volatility</button></div>
+  <label>Tenor <select id="tenor"></select></label>
+  <div id="time-wrap">
+    <button id="play">▶ Play</button>
+    <input id="slider" type="range" min="0" value="0">
+    <span id="time"></span>
+  </div>
+</header>
+<main>
+  <div class="card" id="map"></div>
+  <aside>
+    <div class="card" id="pairs"><h2>Pairs</h2><div id="pair-list"></div>
+      <div id="legend"><span id="lg-lo">Sell</span><div class="bar"></div><span id="lg-hi">Buy</span></div>
+    </div>
+    <div class="card" id="detail" style="margin-top:16px"><h2 id="d-title">Select a pair</h2>
+      <div id="d-body"></div><svg id="spark"></svg></div>
+  </aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<script>
+// Where each currency "lives" on the map.
+const HUBS = {
+  USD: { name: "New York", lonlat: [-74.0, 40.7], countries: ["840"] },
+  EUR: { name: "Frankfurt", lonlat: [8.68, 50.11],
+         countries: ["040","056","191","196","233","246","250","276","300","372","380","428","440","442","470","528","620","703","705","724"] },
+  JPY: { name: "Tokyo", lonlat: [139.7, 35.7], countries: ["392"] },
+  SGD: { name: "Singapore", lonlat: [103.8, 1.35], countries: ["702"] },
+  GBP: { name: "London", lonlat: [-0.13, 51.5], countries: ["826"] },
+};
+const W = 960, H = 500;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const color = s => s == null ? css("--neutral")
+  : d3.interpolateRgbBasis([css("--sell"), css("--neutral"), css("--buy")])(s);
+
+let mode = "signal", volScale;
+const volColor = v => v == null ? css("--neutral")
+  : d3.interpolateRgb(css("--vol-lo"), css("--vol-hi"))(volScale(v));
+// Value + colour for the current mode.
+const val = (i, k) => i ? (mode === "vol" ? data.vol[i.id][k] : data.score[i.id][k]) : null;
+const col = v => mode === "vol" ? volColor(v) : color(v);
+const fmt = v => v == null ? "–" : mode === "vol" ? v.toFixed(2) + "bp" : v.toFixed(2);
+let data, tenor, t = 0, selected = null, timer = null;
+
+Promise.all([
+  d3.json("data.json"),
+  d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json"),
+]).then(([d, world]) => { data = d; init(world); })
+  .catch(err => {
+    document.getElementById("map").innerHTML =
+      `<div class="msg">Couldn't load data.json.<br>Run <code>python frontend/export_data.py</code> then serve with <code>python -m http.server -d frontend</code>.<br><small>${err}</small></div>`;
+  });
+
+function init(world) {
+  const proj = d3.geoNaturalEarth1().fitSize([W, H], { type: "Sphere" });
+  const path = d3.geoPath(proj);
+  const svg = d3.select("#map").append("svg").attr("viewBox", `0 0 ${W} ${H}`);
+  const g = svg.append("g");
+  svg.call(d3.zoom().scaleExtent([1, 8]).on("zoom", e => g.attr("transform", e.transform)));
+
+  const hiSet = new Set(Object.values(HUBS).flatMap(h => h.countries));
+  g.append("g").selectAll("path")
+    .data(topojson.feature(world, world.objects.countries).features)
+    .join("path").attr("class", d => "country" + (hiSet.has(d.id) ? " hi" : "")).attr("d", path);
+
+  // Pairs present in the data, each drawn as an arc between its two hubs.
+  const pairs = [...new Set(data.instruments.map(i => i.pair))]
+    .filter(p => HUBS[p.slice(0,3)] && HUBS[p.slice(3,6)]);
+  const arcPath = p => {
+    const [x1, y1] = proj(HUBS[p.slice(0,3)].lonlat), [x2, y2] = proj(HUBS[p.slice(3,6)].lonlat);
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, dx = x2 - x1, dy = y2 - y1;
+    const k = 0.25; // bend
+    return `M${x1},${y1} Q${mx - dy * k},${my + dx * k - Math.hypot(dx, dy) * 0.1} ${x2},${y2}`;
+  };
+  g.append("g").selectAll("path").data(pairs).join("path")
+    .attr("class", "arc").attr("d", arcPath)
+    .on("click", (e, p) => { selected = p; render(); })
+    .append("title").text(p => p);
+
+  const usedCcy = new Set(pairs.flatMap(p => [p.slice(0,3), p.slice(3,6)]));
+  const hubs = g.append("g").selectAll("g").data([...usedCcy]).join("g").attr("class", "hub")
+    .attr("transform", c => `translate(${proj(HUBS[c].lonlat)})`);
+  hubs.append("circle").attr("r", 5);
+  hubs.append("text").attr("x", 8).attr("y", 4).text(c => c);
+  g.append("g").attr("id", "pulses");
+
+  // Controls
+  const tenors = [...new Set(data.instruments.map(i => i.tenor))];
+  const order = ["SPOT","1W","2W","3W","1M","2M","3M","6M","9M","1Y"];
+  tenors.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  tenor = tenors.includes("1M") ? "1M" : tenors[0];
+  d3.select("#tenor").selectAll("option").data(tenors).join("option").text(d => d)
+    .property("selected", d => d === tenor);
+  d3.select("#tenor").on("change", e => { tenor = e.target.value; render(); });
+  const slider = document.getElementById("slider");
+  slider.max = data.timestamps.length - 1;
+  slider.oninput = () => { t = +slider.value; render(); };
+  const play = document.getElementById("play");
+  play.onclick = () => {
+    if (timer) { clearInterval(timer); timer = null; play.textContent = "▶ Play"; return; }
+    play.textContent = "⏸ Pause";
+    timer = setInterval(() => { t = (t + 1) % data.timestamps.length; slider.value = t; render(); }, 150);
+  };
+  // Vol colour scale: log, clipped to the 5th..95th percentile across everything.
+  const all = Object.values(data.vol).flat().filter(v => v != null && v > 0).sort(d3.ascending);
+  const lo = d3.quantileSorted(all, .05), hi = d3.quantileSorted(all, .95);
+  volScale = d3.scaleLog([lo, hi], [0, 1]).clamp(true);
+  d3.selectAll("#mode button").on("click", e => {
+    mode = e.target.dataset.m;
+    d3.selectAll("#mode button").classed("on", function () { return this.dataset.m === mode; });
+    document.body.classList.toggle("vol", mode === "vol");
+    document.getElementById("lg-lo").textContent = mode === "vol" ? lo.toFixed(2) + "bp" : "Sell";
+    document.getElementById("lg-hi").textContent = mode === "vol" ? hi.toFixed(2) + "bp" : "Buy";
+    render();
+  });
+  selected = pairs[0];
+  window.__ctx = { proj, pairs };
+  render();
+}
+
+const instFor = p => data.instruments.find(i => i.pair === p && i.tenor === tenor);
+const actLabel = a => a > 0 ? ["BUY", "--buy"] : a < 0 ? ["SELL", "--sell"] : ["HOLD", "--neutral"];
+
+function render() {
+  const { proj, pairs } = window.__ctx;
+  document.getElementById("time").textContent =
+    new Date(data.timestamps[t]).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+
+  d3.selectAll(".arc")
+    .attr("stroke", p => { const i = instFor(p); return col(val(i, t)); })
+    .attr("stroke-width", p => { const i = instFor(p); return i && data.action[i.id][t] ? 7 : 4; })
+    .classed("sel", p => p === selected);
+
+  // Pulse ring on the base-currency hub when the model trades.
+  const trades = pairs.map(p => ({ p, i: instFor(p) })).filter(d => d.i && data.action[d.i.id][t]);
+  d3.select("#pulses").selectAll("circle").data(trades, d => d.p + t).join(
+    enter => enter.append("circle").attr("class", "pulse")
+      .attr("transform", d => `translate(${proj(HUBS[d.p.slice(3,6)].lonlat)})`)
+      .attr("stroke", d => css(actLabel(data.action[d.i.id][t])[1]))
+      .attr("r", 4).attr("opacity", 1)
+      .call(s => s.transition().duration(900).attr("r", 22).attr("opacity", 0).remove()));
+
+  // Pair list
+  d3.select("#pair-list").selectAll(".row").data(pairs).join("div").attr("class", "row")
+    .on("click", (e, p) => { selected = p; render(); })
+    .html(p => {
+      const i = instFor(p); if (!i) return `<span>${p}</span><span>–</span>`;
+      const s = val(i, t), [lab, c] = actLabel(data.action[i.id][t]);
+      return `<span>${p} <b style="color:${col(s)}">${fmt(s)}</b></span>
+              <span class="pill" style="background:${css(c)}">${lab}</span>`;
+    });
+
+  // Detail panel
+  const i = selected && instFor(selected);
+  document.getElementById("d-title").textContent = i ? i.id : "Select a pair";
+  if (!i) { d3.select("#d-body").html("No data for this tenor"); d3.select("#spark").selectAll("*").remove(); return; }
+  const s = data.score[i.id][t], cm = data.close_mid[i.id][t], [lab] = actLabel(data.action[i.id][t]);
+  d3.select("#d-body").html(`
+    <div class="row"><span>Score (P buy)</span><span>${s == null ? "–" : s.toFixed(3)}</span></div>
+    <div class="row"><span>Vol (${data.vol_kind || "realised"}, bp/min)</span><span>${data.vol ? (data.vol[i.id][t] ?? "–") : "–"}</span></div>
+    <div class="row"><span>Action</span><span>${lab}</span></div>
+    <div class="row"><span>Close mid</span><span>${cm ?? "–"}</span></div>
+    <div class="row"><span>Trades so far</span><span>${data.action[i.id].slice(0, t + 1).filter(a => a).length}</span></div>`);
+
+  const sp = d3.select("#spark"), sw = sp.node().clientWidth || 270, sh = 80;
+  sp.attr("viewBox", `0 0 ${sw} ${sh}`);
+  const x = d3.scaleLinear([0, data.timestamps.length - 1], [0, sw]), y = mode === "vol"
+    ? d3.scaleLinear([0, d3.max(data.vol[i.id]) || 1], [sh - 2, 2])
+    : d3.scaleLinear([0, 1], [sh - 2, 2]);
+  const series = mode === "vol" ? data.vol[i.id] : data.score[i.id];
+  sp.selectAll("*").remove();
+  if (mode === "signal") sp.append("line").attr("x1", 0).attr("x2", sw).attr("y1", y(.5)).attr("y2", y(.5));
+  sp.append("path").attr("d", d3.line().defined(v => v != null).x((v, k) => x(k)).y(v => y(v))(series));
+  sp.append("line").attr("class", "cursor").attr("x1", x(t)).attr("x2", x(t)).attr("y1", 0).attr("y2", sh);
+}
+</script>
+</body>
+</html>
