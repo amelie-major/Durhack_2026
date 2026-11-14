@@ -56,7 +56,7 @@ python -m pytest
 
 ## PRAGMA-style model
 
-A small reimplementation of Revolut's PRAGMA ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) in `models/pragma/`. One bar is one "event"; the model sees the last 240 bars of an instrument and is scored on exactly the same test rows as the XGBoost model. Settings live in `models/pragma/config.py`.
+A small reimplementation of Revolut's PRAGMA ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) in `models/pragma/`. Full write-up: [PRAGMA.md](PRAGMA.md). One bar is one "event"; the model sees the last 240 bars of an instrument and is scored on exactly the same test rows as the XGBoost model. Settings live in `models/pragma/config.py`.
 
 Run on a GPU machine (Colab, NCC) from the repo root, after the data loader:
 
