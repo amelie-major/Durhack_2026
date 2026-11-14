@@ -128,8 +128,8 @@ def split_rows(series: Dict[str, pd.DataFrame], bars: Bars, target: Optional[str
     """
     parts: Dict[str, List[pd.DataFrame]] = {name: [] for name in SPLITS}
     for instrument_id, df in series.items():
-        if target == "vol" and df.attrs["tenor"] != VOL_TENOR:
-            continue
+        if target == "vol" and len(series) > 1 and df.attrs["tenor"] != VOL_TENOR:
+            continue  # same rule as build_dataset: a lone instrument is kept
 
         rows = pd.DataFrame({
             "timestamp": df["timestamp"],

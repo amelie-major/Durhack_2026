@@ -15,7 +15,7 @@ Filename format: `PAIR_DEALTCCY_PRODUCT_TENOR_NOTIONAL_YYYYMMDD.csv`, for exampl
 | EURUSD | FORWARD | 1W, 2W, 3W, 1M, 2M, 3M, 6M, 9M, 1Y | 53 each |
 | USDJPY | FORWARD | same 9 | 53 each |
 | USDSGD | FORWARD | same 9 | 45–53 each (missing days) |
-| EURUSD, USDJPY, USDSGD | SPOT | SPOT | 53 each (not loaded yet) |
+| EURUSD, USDJPY, USDSGD | SPOT | SPOT | 53 each |
 
 - Date range: 2026-07-01 to 2026-08-31.
 - Notional is 1,000,000 everywhere.
@@ -29,7 +29,7 @@ Filename format: `PAIR_DEALTCCY_PRODUCT_TENOR_NOTIONAL_YYYYMMDD.csv`, for exampl
 
 Most are redundant (`mid = (bid+ask)/2`, `all_in = mid + mid_fp`; verified to within 1e-6), so the loader keeps only: `open/high/low/close_mid`, `close_bid`, `close_ask`, `close_mid_fp`, `close_mid_all_in`, `settlement_date`.
 
-Spot files have no `_fp` or `all_in` columns, so the loader currently rejects them.
+Spot files have no `_fp` or `all_in` columns; the loader fills forward points with 0 and the all-in price with the mid.
 
 ## Quality findings
 
