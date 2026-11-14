@@ -174,12 +174,12 @@ Not recorded yet. Paste the tables from the end of `slurm-<jobid>.out` here when
 
 ### Laptop smoke run (not a benchmark)
 
-`smoke` preset, volatility at 30 minutes, 24,832 test rows. The model is 0.23M parameters with a 32-bar context and a few minutes of training, while XGBoost uses 60-minute features, so this only shows the pipeline works.
+`smoke` preset, volatility at 30 minutes, 24,832 test rows. The model is 0.23M parameters with a 32-bar context and a few minutes of training, while XGBoost uses rolling features up to a day long, so this only shows the pipeline works.
 
 | Model | RMSE | R² |
 |---|---|---|
 | baseline | 0.3678 | 0.343 |
-| xgboost | 0.2840 | 0.608 |
+| xgboost | 0.2730 | 0.638 |
 | pragma finetune | 0.3183 | 0.508 |
 | pragma probe | 0.3253 | 0.486 |
 | pragma scratch | 0.3164 | 0.513 |
