@@ -22,7 +22,7 @@
 #SBATCH --job-name=pragma
 #SBATCH -N 1
 #SBATCH -c 4
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:ampere:1    # NCC requires a GPU type: pascal, turing or ampere
 #SBATCH --mem=28G
 #SBATCH -p ug-gpu-small          # partition: ug- undergrad, tpg- taught PG, res- research
 #SBATCH --qos=short              # QOS: must allow the time limit below
