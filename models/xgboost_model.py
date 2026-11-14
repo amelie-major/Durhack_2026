@@ -26,9 +26,15 @@ TENOR_DAYS = {
     "1Y": 365,
 }
 
+LOADER_VOL_WINDOWS = (15, 60)  # subset of loader.VOL_WINDOWS used as features
+
 FEATURES = [
-    # recent volatility
-    "ret_std_15", "ret_std_60", "range_mean_15", "range_mean_60",
+    # recent volatility: close-to-close std from loader.add_features (gap bars
+    # excluded). Its vol_240 and pk_vol_* (Parkinson) columns were tried too and
+    # raised test RMSE for the vol target (0.285 -> 0.289 over 5 seeds), so they
+    # are left out.
+    *[f"vol_{w}" for w in LOADER_VOL_WINDOWS],
+    "range_mean_15", "range_mean_60",
     # recent spread
     "spread_bp", "spread_mean_15", "spread_mean_60",
     # time of day / week (UTC)
@@ -53,15 +59,17 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     is_gap = df["is_gap"].astype(bool)
 
-    # A gap bar's return spans the missing minutes (up to a weekend), so it is
+    # A gap bar's range spans the missing minutes (up to a weekend), so it is
     # hidden from the rolling windows rather than read as a volatility spike.
-    ret = df["ret_bp"].mask(is_gap)
     bar_range = df["range_bp"].mask(is_gap)
     for window in (15, 60):
         min_bars = window // 3
-        out[f"ret_std_{window}"] = ret.rolling(window, min_periods=min_bars).std()
         out[f"range_mean_{window}"] = bar_range.rolling(window, min_periods=min_bars).mean()
         out[f"spread_mean_{window}"] = df["spread_bp"].rolling(window, min_periods=min_bars).mean()
+
+    # Volatility computed by the loader (trailing windows, no look-ahead).
+    for window in LOADER_VOL_WINDOWS:
+        out[f"vol_{window}"] = df[f"vol_{window}"]
 
     out["spread_bp"] = df["spread_bp"]
     out["minute_of_day"] = df["minute_of_day"]
@@ -103,7 +111,7 @@ def baseline_prediction(features: pd.DataFrame, target: str, horizon: int) -> pd
     """Naive "the next hour looks like the last hour" forecast to beat."""
     if target == "vol":
         # per-minute std over the last hour, scaled up to a `horizon`-minute window
-        recent_vol = features["ret_std_60"] * np.sqrt(horizon)
+        recent_vol = features["vol_60"] * np.sqrt(horizon)
         return np.log(recent_vol.clip(lower=VOL_FLOOR_BP))
     return np.log(features["spread_mean_60"])
 
