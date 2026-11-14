@@ -248,3 +248,43 @@ def test_cli(dataset, tmp_path, capsys):
     assert L.main([str(root), str(out)]) == 0
     assert "saved 3 instruments" in capsys.readouterr().out
     assert len(list(out.glob("*.parquet"))) == 3
+
+
+def _spot_day(day):
+    df = make_day(day, 1.14, seed=7)
+    return df.drop(columns=[c for c in df.columns if c.endswith(("_fp", "_all_in"))])
+
+
+def test_read_day_spot_fills_fp(tmp_path):
+    df = _spot_day(pd.Timestamp(START))
+    clean, stats = L.read_day(df.to_csv(index=False).encode())
+    assert stats["n_kept"] == len(df)
+    assert (clean["close_mid_fp"] == 0).all()
+    assert np.allclose(clean["close_mid_all_in"], clean["close_mid"])
+
+
+def test_read_day_forward_missing_one_fp_col_still_errors():
+    df = make_day(pd.Timestamp(START), 1.14, seed=1).drop(columns=["close_mid_fp"])
+    with pytest.raises(ValueError):
+        L.read_day(df.to_csv(index=False).encode())
+
+
+def test_product_flag(dataset, tmp_path):
+    root, _ = dataset
+    for d in range(N_DAYS):
+        day = pd.Timestamp(START) + pd.Timedelta(days=d)
+        _spot_day(day).to_csv(root / f"EURUSD_EUR_SPOT_SPOT_1000000_{day:%Y%m%d}.csv", index=False)
+    spot_id = "EURUSD_EUR_SPOT_SPOT_1000000"
+
+    every, man = L.load_all([root], verbose=False)
+    assert spot_id in every and len(every) == 4 and (man["status"] == "ok").all()
+    spot, _ = L.load_all([root], verbose=False, product="spot")
+    assert list(spot) == [spot_id]
+    fwd, _ = L.load_all([root], verbose=False, product="forward")
+    assert spot_id not in fwd and len(fwd) == 3
+    with pytest.raises(ValueError):
+        list(L.discover([root], product="bogus"))
+
+    out = tmp_path / "out"
+    assert L.main(["--product", "spot", "-q", str(root), str(out)]) == 0
+    assert (out / f"{spot_id}.parquet").exists()
