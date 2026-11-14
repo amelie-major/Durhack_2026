@@ -55,3 +55,13 @@ pretrain_ids, holdout_ids = split_instruments(series, holdout_pairs=["USDSGD"])
 ```bash
 python -m pytest
 ```
+
+## Visualiser (world map)
+
+```bash
+python models/signal.py ... --export actions.csv   # produce model output
+python frontend/export_data.py actions.csv         # writes frontend/data.json (15-min buckets; --freq to change)
+python -m http.server -d frontend 8000             # open http://localhost:8000
+```
+
+Each currency pair is an arc between its two financial centres, coloured by the model score (red = sell, green = buy). Pick a tenor, scrub or play through time, and click a pair for details.

@@ -188,7 +188,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "(default: every instrument, each modelled on its own)")
     parser.add_argument("--export", metavar="PATH",
                         help="write instrument_id,timestamp,close_mid,score (1 buy .. 0 sell), "
-                             "action (1 buy, 0 nothing, -1 sell) to this CSV for a visualiser")
+                             "action (1 buy, 0 nothing, -1 sell), pred_vol_bp to this CSV for a visualiser")
     parser.add_argument("--jobs", type=int, default=-1)
     parser.add_argument("--save", metavar="PATH", help="write per-row signals to this CSV")
     args = parser.parse_args(argv)
@@ -227,7 +227,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               f"{r['signal']:<5} p_up={r['p_up']:.3f} exp={r['expected_move_bp']:+.2f}bp "
               f"spread={r['pred_spread_bp']:.2f}bp")
     if args.export:
-        cols = ["instrument_id", "timestamp", "close_mid", "score", "action"]
+        cols = ["instrument_id", "timestamp", "close_mid", "score", "action", "pred_vol_bp"]
         rows.sort_values(["instrument_id", "timestamp"])[cols].to_csv(args.export, index=False)
         print(f"\nexported {len(rows):,} rows to {args.export}")
     if args.save:
