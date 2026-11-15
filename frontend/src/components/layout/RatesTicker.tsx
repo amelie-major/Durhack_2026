@@ -12,8 +12,7 @@ import ModelToggle from './ModelToggle'
 import NextUpdate from './NextUpdate'
 import { decimalsFor } from '../../data/mock'
 import { actionFor, SIGNAL_INFO } from '../../lib/signal'
-import { LEVEL_INFO, levelFor, worseLevel } from '../../lib/storm'
-import { findPair } from '../../lib/zones'
+import { LEVEL_INFO, levelFor } from '../../lib/storm'
 import { useAppStore } from '../../store/useAppStore'
 import type { SignalAction, Snapshot, StormLevel, Tolerance } from '../../types'
 
@@ -21,28 +20,20 @@ interface TickerItem {
   pair: string // "EUR/USD"
   mid: number | null
   level: StormLevel
-  /** Buy/Sell signal; null for crosses (the model only signals the pairs it has data for) */
   signal: SignalAction | null
 }
 
-/** The 3 data pairs plus 3 crosses derived through USD */
+/** Every pair the data has (USD pairs first, then crosses), each with its own level and signal */
 function tickerItems(snapshot: Snapshot | null, tolerance: Tolerance): TickerItem[] {
-  const get = (a: string, b: string) => findPair(snapshot, a, b)
-  const eurusd = get('EUR', 'USD')
-  const usdjpy = get('USD', 'JPY')
-  const usdsgd = get('USD', 'SGD')
-  const lvl = (p = eurusd) => levelFor(p, tolerance)
-  const both = (x?: number, y?: number, f = (a: number, b: number) => a * b) =>
-    x != null && y != null ? f(x, y) : null
-
-  return [
-    { pair: 'EUR/USD', mid: eurusd?.mid ?? null, level: lvl(eurusd), signal: actionFor(eurusd) },
-    { pair: 'USD/JPY', mid: usdjpy?.mid ?? null, level: lvl(usdjpy), signal: actionFor(usdjpy) },
-    { pair: 'USD/SGD', mid: usdsgd?.mid ?? null, level: lvl(usdsgd), signal: actionFor(usdsgd) },
-    { pair: 'EUR/JPY', mid: both(eurusd?.mid, usdjpy?.mid), level: worseLevel(lvl(eurusd), lvl(usdjpy)), signal: null },
-    { pair: 'EUR/SGD', mid: both(eurusd?.mid, usdsgd?.mid), level: worseLevel(lvl(eurusd), lvl(usdsgd)), signal: null },
-    { pair: 'SGD/JPY', mid: both(usdjpy?.mid, usdsgd?.mid, (j, s) => j / s), level: worseLevel(lvl(usdjpy), lvl(usdsgd)), signal: null },
-  ]
+  const pairs = [...(snapshot?.pairs ?? [])].sort(
+    (a, b) => Number(!a.pair.includes('USD')) - Number(!b.pair.includes('USD')) || a.pair.localeCompare(b.pair),
+  )
+  return pairs.map((p) => ({
+    pair: `${p.base}/${p.quote}`,
+    mid: p.mid,
+    level: levelFor(p, tolerance),
+    signal: actionFor(p),
+  }))
 }
 
 function TickerEntry({ item, copy = false, showSignal }: { item: TickerItem; copy?: boolean; showSignal: boolean }) {

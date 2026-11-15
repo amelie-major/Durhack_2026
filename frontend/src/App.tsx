@@ -22,15 +22,16 @@ function useSnapshotLoader() {
   const model = useAppStore((s) => s.model)
   const setSnapshot = useAppStore((s) => s.setSnapshot)
   useEffect(() => {
-    let cancelled = false
-    getSnapshot(asOf, base, replaying, model)
+    // Abort the request when asOf moves on, so slow ones don't pile up during replay
+    const controller = new AbortController()
+    getSnapshot(asOf, base, replaying, model, controller.signal)
       .then((snap) => {
-        if (!cancelled) setSnapshot(snap)
+        if (!controller.signal.aborted) setSnapshot(snap)
       })
-      .catch((err: unknown) => console.error('[data] could not load snapshot', err))
-    return () => {
-      cancelled = true
-    }
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) console.error('[data] could not load snapshot', err)
+      })
+    return () => controller.abort()
   }, [asOf, base, replaying, model, setSnapshot])
 }
 

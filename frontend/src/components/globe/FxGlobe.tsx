@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Globe, { type GlobeMethods } from 'react-globe.gl'
-import { SINGAPORE_MARKER, ZONES, ZONE_BY_COUNTRY, type CurrencyZone } from '../../data/currencies'
+import { POINT_MARKERS, ZONES, ZONE_BY_COUNTRY, type CurrencyZone, type PointMarker } from '../../data/currencies'
 import { countryCode, escapeHtml, type CountryFeature } from '../../lib/geo'
 import { usePrefersReducedMotion, useWindowSize } from '../../lib/hooks'
 import { slashPair } from '../../lib/pro'
@@ -33,24 +33,24 @@ const SPIN_SPEED = 0.35
 const START_VIEW = { lat: 22, lng: 20, altitude: 2.4 }
 const FOCUS_ALTITUDE = 1.9
 
-type SingaporeMarker = typeof SINGAPORE_MARKER
-
-/** A line between the two countries of a pair */
-interface PairArc {
-  pair: PairSnapshot
+/** Stable arc geometry between two currency zones (never recreated on timeframe ticks) */
+interface StableArc {
+  id: string
+  base: string
+  quote: string
   startLat: number
   startLng: number
   endLat: number
   endLng: number
-  color: string
-  /** A buy or sell is on (drawn thicker, with rings at both ends) */
-  active: boolean
 }
 
-interface Ring {
+/** Stable ring anchor (only recreated when the set of pulsing locations changes) */
+interface StableRing {
+  id: string
   lat: number
   lng: number
-  color: string
+  zoneCode?: string
+  pairId?: string
 }
 
 const ZONE_BY_CODE = new Map(ZONES.map((z) => [z.code, z]))
@@ -63,13 +63,13 @@ function signalLines(pair: PairSnapshot | undefined): string[] {
   return detail ? [headline, detail] : [headline]
 }
 
-function arcTooltip(arc: PairArc, layer: MapLayer, level: ZoneLevel): string {
+function arcTooltip(pair: PairSnapshot, layer: MapLayer, level: ZoneLevel): string {
   const lines: string[] = []
-  if (layer === 'signal') lines.push(...signalLines(arc.pair))
+  if (layer === 'signal') lines.push(...signalLines(pair))
   else if (level === 'nodata' || level === 'home') lines.push('No reliable data right now')
   else lines.push(`${LEVEL_INFO[level].name} · ${LEVEL_INFO[level].volatility.toLowerCase()} (next 30 min)`)
   const body = lines.map((l) => `<span>${escapeHtml(l)}</span>`).join('')
-  return `<div class="globe-tip"><strong>${escapeHtml(slashPair(arc.pair.pair))}</strong>${body}</div>`
+  return `<div class="globe-tip"><strong>${escapeHtml(slashPair(pair.pair))}</strong>${body}</div>`
 }
 
 function tooltipHtml(
@@ -179,28 +179,41 @@ export default function FxGlobe() {
     [levelColor, zoneLevels, mapLayer, base, colors, signalColor, snapshot],
   )
 
-  // One line per pair we have data for, between the two currencies' countries
-  const arcs = useMemo<PairArc[]>(
+  // Only rebuild arc objects when the set of currency pairs actually changes
+  const pairSignature = useMemo(
     () =>
-      (snapshot?.pairs ?? []).flatMap((pair) => {
-        const a = ZONE_BY_CODE.get(pair.base)
-        const b = ZONE_BY_CODE.get(pair.quote)
-        if (!a || !b) return []
-        const action = actionFor(pair)
-        const signalLayer = mapLayer === 'signal'
-        return [
-          {
-            pair,
-            startLat: a.anchor.lat,
-            startLng: a.anchor.lng,
-            endLat: b.anchor.lat,
-            endLng: b.anchor.lng,
-            color: signalLayer ? signalColor(pair) : levelColor(levelFor(pair, tolerance)),
-            active: signalLayer && (action === 'buy' || action === 'sell'),
-          },
-        ]
-      }),
-    [snapshot, mapLayer, tolerance, signalColor, levelColor],
+      (snapshot?.pairs ?? [])
+        .map((p) => `${p.base}-${p.quote}`)
+        .sort()
+        .join('|'),
+    [snapshot?.pairs],
+  )
+
+  const arcs = useMemo<StableArc[]>(() => {
+    return (snapshot?.pairs ?? []).flatMap((pair) => {
+      const a = ZONE_BY_CODE.get(pair.base)
+      const b = ZONE_BY_CODE.get(pair.quote)
+      if (!a || !b) return []
+      return [
+        {
+          id: `${pair.base}-${pair.quote}`,
+          base: pair.base,
+          quote: pair.quote,
+          startLat: a.anchor.lat,
+          startLng: a.anchor.lng,
+          endLat: b.anchor.lat,
+          endLng: b.anchor.lng,
+        },
+      ]
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairSignature])
+
+  const getPairForArc = useCallback(
+    (arc: StableArc) => {
+      return snapshot?.pairs.find((p) => p.base === arc.base && p.quote === arc.quote)
+    },
+    [snapshot?.pairs],
   )
 
   // 1. Load country shapes once (local file, so venue wifi can't break it)
@@ -220,37 +233,103 @@ export default function FxGlobe() {
     return () => controller.abort()
   }, [])
 
-  const singaporeData = useMemo(() => [SINGAPORE_MARKER], [])
-
   // Pulsing rings (none when "reduce motion" is on):
-  // volatility layer → on every "Extreme" zone; Buy / Sell layer → green/red at both ends of an active line
-  const rings = useMemo<Ring[]>(() => {
-    if (reducedMotion) return []
+  // Stabilized by active keys so ringRepeatPeriod runs on its own clock across ticks
+  const activeRingKeys = useMemo(() => {
+    if (reducedMotion) return ''
     if (mapLayer === 'volatility') {
-      return ZONES.filter((z) => zoneLevels.get(z.code) === 'extreme').map((z) => ({ ...z.anchor, color: colors.extreme }))
+      return ZONES.filter((z) => zoneLevels.get(z.code) === 'extreme')
+        .map((z) => `zone:${z.code}`)
+        .sort()
+        .join('|')
     }
-    return arcs
-      .filter((a) => a.active)
-      .flatMap((a) => [
-        { lat: a.startLat, lng: a.startLng, color: a.color },
-        { lat: a.endLat, lng: a.endLng, color: a.color },
-      ])
-  }, [zoneLevels, reducedMotion, mapLayer, arcs, colors])
-  const ringColor = useCallback((obj: object) => (t: number) => withAlpha((obj as Ring).color, Math.max(0, 1 - t)), [])
+    return (snapshot?.pairs ?? [])
+      .filter((p) => {
+        const action = actionFor(p)
+        return (action === 'buy' || action === 'sell') && ZONE_BY_CODE.has(p.base) && ZONE_BY_CODE.has(p.quote)
+      })
+      .map((p) => `pair:${p.base}-${p.quote}`)
+      .sort()
+      .join('|')
+  }, [reducedMotion, mapLayer, zoneLevels, snapshot?.pairs])
+
+  const rings = useMemo<StableRing[]>(() => {
+    if (!activeRingKeys) return []
+    return activeRingKeys.split('|').flatMap<StableRing>((key) => {
+      if (key.startsWith('zone:')) {
+        const code = key.slice(5)
+        const z = ZONE_BY_CODE.get(code)
+        return z ? [{ id: key, lat: z.anchor.lat, lng: z.anchor.lng, zoneCode: code }] : []
+      }
+      const pairId = key.slice(5)
+      const [baseCode, quoteCode] = pairId.split('-')
+      const a = ZONE_BY_CODE.get(baseCode)
+      const b = ZONE_BY_CODE.get(quoteCode)
+      if (!a || !b) return []
+      return [
+        { id: `${key}:a`, lat: a.anchor.lat, lng: a.anchor.lng, pairId },
+        { id: `${key}:b`, lat: b.anchor.lat, lng: b.anchor.lng, pairId },
+      ]
+    })
+  }, [activeRingKeys])
+
+  const ringColor = useCallback(
+    (obj: object) => {
+      const ring = obj as StableRing
+      return (t: number) => {
+        let baseColor = colors.extreme
+        if (ring.pairId) {
+          const [b, q] = ring.pairId.split('-')
+          const pair = snapshot?.pairs.find((p) => p.base === b && p.quote === q)
+          baseColor = signalColor(pair)
+        }
+        return withAlpha(baseColor, Math.max(0, 1 - t))
+      }
+    },
+    [colors.extreme, snapshot?.pairs, signalColor],
+  )
+
+  const arcColor = useCallback(
+    (obj: object) => {
+      const pair = getPairForArc(obj as StableArc)
+      if (!pair) return colors.nodata
+      return mapLayer === 'signal' ? signalColor(pair) : levelColor(levelFor(pair, tolerance))
+    },
+    [getPairForArc, mapLayer, signalColor, levelColor, tolerance, colors.nodata],
+  )
+
+  const arcStroke = useCallback(
+    (obj: object) => {
+      const pair = getPairForArc(obj as StableArc)
+      const action = actionFor(pair)
+      const isSignalActive = mapLayer === 'signal' && (action === 'buy' || action === 'sell')
+      return isSignalActive ? 0.9 : 0.5
+    },
+    [getPairForArc, mapLayer],
+  )
 
   const arcLabel = useCallback(
     (obj: object) => {
-      const arc = obj as PairArc
-      return arcTooltip(arc, mapLayer, levelFor(arc.pair, tolerance))
+      const pair = getPairForArc(obj as StableArc)
+      if (!pair) return ''
+      return arcTooltip(pair, mapLayer, levelFor(pair, tolerance))
     },
-    [mapLayer, tolerance],
+    [getPairForArc, mapLayer, tolerance],
   )
 
   /** Clicking a line points the app at that pair (its currency that isn't the "From" one) */
   const handleArcClick = useCallback(
     (obj: object) => {
-      const { pair } = obj as PairArc
-      setQuote(pair.base === base ? pair.quote : pair.quote === base ? pair.base : pair.quote === 'USD' ? pair.base : pair.quote)
+      const arc = obj as StableArc
+      setQuote(
+        arc.base === base
+          ? arc.quote
+          : arc.quote === base
+            ? arc.base
+            : arc.quote === 'USD'
+              ? arc.base
+              : arc.quote,
+      )
     },
     [setQuote, base],
   )
@@ -388,14 +467,14 @@ export default function FxGlobe() {
 
   const handlePointClick = useCallback(
     (obj: object) => {
-      const m = obj as SingaporeMarker
+      const m = obj as PointMarker
       selectCountry({ code: m.code, name: m.name, zone: ZONE_BY_COUNTRY.get(m.code) ?? null }, { lat: m.lat, lng: m.lng })
     },
     [selectCountry],
   )
 
   const handlePointHover = useCallback((obj: object | null) => {
-    setHoveredCode(obj ? (obj as SingaporeMarker).code : null)
+    setHoveredCode(obj ? (obj as PointMarker).code : null)
   }, [])
 
   const handleGlobeReady = useCallback(() => {
@@ -426,28 +505,28 @@ export default function FxGlobe() {
         polygonsTransitionDuration={reducedMotion ? 0 : 250}
         onPolygonClick={handlePolygonClick}
         onPolygonHover={handlePolygonHover}
-        // Singapore (too small to be a polygon at this map scale)
-        pointsData={singaporeData}
+        // Singapore and Hong Kong (too small to be polygons at this map scale)
+        pointsData={POINT_MARKERS}
         pointLat="lat"
         pointLng="lng"
-        pointColor={() => zoneColor('SGP') ?? colors.nodata}
-        pointAltitude={(obj: object) => (isActive((obj as SingaporeMarker).code) ? 0.05 : 0.025)}
+        pointColor={(obj: object) => zoneColor((obj as PointMarker).code) ?? colors.nodata}
+        pointAltitude={(obj: object) => (isActive((obj as PointMarker).code) ? 0.05 : 0.025)}
         pointRadius={1.1}
-        pointLabel={(obj: object) => tooltipFor((obj as SingaporeMarker).name, 'SGP')}
+        pointLabel={(obj: object) => tooltipFor((obj as PointMarker).name, (obj as PointMarker).code)}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
-        // Lines joining the two countries of each pair
+        // Lines joining the two countries of each pair (independent continuous dash clock)
         arcsData={arcs}
-        arcColor="color"
-        arcStroke={(obj: object) => ((obj as PairArc).active ? 0.9 : 0.5)}
+        arcColor={arcColor}
+        arcStroke={arcStroke}
         arcAltitudeAutoScale={0.35}
         arcDashLength={reducedMotion ? 1 : 0.45}
         arcDashGap={reducedMotion ? 0 : 0.12}
-        arcDashAnimateTime={(obj: object) => (reducedMotion ? 0 : (obj as PairArc).active ? 1400 : 4200)}
+        arcDashAnimateTime={reducedMotion ? 0 : 2400}
         arcsTransitionDuration={0}
         arcLabel={arcLabel}
         onArcClick={handleArcClick}
-        // Warning rings (extreme volatility) or buy/sell pulses
+        // Warning rings (extreme volatility) or buy/sell pulses (independent ring clock)
         ringsData={rings}
         ringLat="lat"
         ringLng="lng"

@@ -38,6 +38,25 @@ Expected result: 30 instruments (27 forward, 3 spot) and 0 errors. Spot files ha
 
 Use `--product forward` or `--product spot` (`-p`) to load only one kind. From Python: `load_all(paths, product="spot")`.
 
+## More currency pairs (optional)
+
+Challenge1 has three pairs. `fetch_dukascopy.py` downloads 1-minute spot bars with bid and ask for 18 more from Dukascopy's free datafeed (GBP, AUD, NZD, CHF, CAD, CNH, HKD, MXN, ZAR, NOK, SEK, PLN and TRY against USD, plus five crosses) and writes them in the Challenge1 spot format:
+
+```bash
+python fetch_dukascopy.py --workers 16           # all default pairs, same dates as Challenge1
+python fetch_dukascopy.py --pairs GBPUSD USDMXN  # or just some
+```
+
+The server is slow and throttles (2 to 10 seconds per file, 124 files per pair), so the full list takes about 2.5 hours. Downloads are cached in `data/raw/dukascopy/cache/`; if it stops, run it again and it carries on. To skip the download, take `dukascopy.zip` (23 MB) from the shared drive and put it in `data/raw/`.
+
+To use both feeds together, give the loader both:
+
+```bash
+python loader.py data/raw/Challenge1.zip data/raw/dukascopy.zip data/processed
+```
+
+That writes 48 instruments. Each has a `feed` (`challenge1` or `dukascopy`) in `df.attrs`, and Dukascopy's `spread_bp` is rescaled to Challenge1's level (the quoted value is kept in `spread_bp_raw`). XGBoost trains on the combined folder for both targets; the PRAGMA and signal models still use 1M forwards only for volatility and direction, so they ignore the new pairs there. Details and caveats are in [DATA_OVERVIEW.md](DATA_OVERVIEW.md#combining-the-two-feeds).
+
 ## Use it from Python
 
 From a script or notebook in the repo root:
@@ -95,3 +114,21 @@ backbone, not a forecasting model. It serves the predictions PRAGMA made in its 
 ```bash
 python -m pytest
 ```
+
+## PRAGMA-style model
+
+A small reimplementation of Revolut's PRAGMA ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) in `models/pragma/`. Full write-up: [PRAGMA.md](PRAGMA.md). One bar is one "event"; the model sees the last 240 bars of an instrument and is scored on exactly the same test rows as the XGBoost model. Settings live in `models/pragma/config.py`.
+
+Run on a GPU machine (Colab, NCC) from the repo root, after the data loader:
+
+```bash
+python -m models.pragma.train pretrain --preset gpu     # masked pre-training, writes runs/pragma/pretrain.pt
+python -m models.pragma.train finetune --target vol     # fine-tune a regression head
+python -m models.pragma.train probe    --target vol     # linear model on frozen embeddings
+python -m models.pragma.train finetune --target vol --from-scratch   # optional: no pre-training
+python -m models.pragma.compare        --target vol     # table: baseline / XGBoost / PRAGMA
+```
+
+Repeat the last four with `--target spread`. Use `--preset smoke` on `pretrain` for a few-minute CPU run that only checks the pipeline works; its scores are not meaningful. `runs/` is gitignored.
+
+On NCC, `sbatch scripts/ncc_pragma.sh` runs all of the above for both targets in one job (copy `data/processed/` over first; see the top of the script).

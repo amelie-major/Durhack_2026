@@ -36,7 +36,7 @@ from xgboost import XGBClassifier
 
 from loader import load_processed, time_split
 from models.cost_ratio import KEYS, cost_ratios
-from models.xgboost_model import FEATURES, MAX_HORIZON, VOL_TENOR, build_features
+from models.xgboost_model import FEATURES, MAX_HORIZON, build_features, vol_instruments
 
 MOMENTUM_WINDOWS = (5, 15, 60)
 DIRECTION_FEATURES = FEATURES + [
@@ -68,10 +68,12 @@ def build_direction_rows(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 
 def direction_dataset(series: Dict[str, pd.DataFrame], horizon: int):
-    """(train, val, test) for the direction model; one tenor per pair, like vol."""
+    """(train, val, test) for the direction model; one instrument per pair, like vol
+    (its 1M forward, or spot for a spot-only pair)."""
     parts = {"train": [], "val": [], "test": []}
-    for df in series.values():
-        if len(series) > 1 and df.attrs["tenor"] != VOL_TENOR:
+    chosen = vol_instruments(series)
+    for instrument_id, df in series.items():
+        if len(series) > 1 and instrument_id not in chosen:
             continue
         rows = build_direction_rows(df, horizon)
         for name, part in zip(parts, time_split(rows)):

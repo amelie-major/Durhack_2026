@@ -21,9 +21,10 @@ replay). Without it the server's ``--model`` default is used.
 With ``asOf`` the server time-travels: it answers as it would have at that
 moment, using only bars at or before it (replay mode in the frontend).
 
-Yahoo gives spot mid OHLC only (no bid/ask, no forward points), so each pair's
-live 1M-forward bar is built from the live spot price plus that instrument's
-historical median spread and forward points. The features then go through the
+Every pair in data/processed is served. Yahoo gives spot mid OHLC only (no
+bid/ask, no forward points), so each pair's live bar is built from the live spot
+price plus the historical median spread and forward points of the instrument
+that pair's models use: its 1M forward, or spot for a spot-only pair. The features then go through the
 same code as training: loader.add_features -> models.xgboost_model.build_features.
 Because the live spread is that constant, the spread forecast mostly reflects
 time of day and recent volatility, not live quotes.
@@ -35,6 +36,7 @@ import json
 import math
 import pickle
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,12 +51,13 @@ from live import pragma_replay
 from loader import add_features, load_processed
 from models.signal import (DIRECTION_FEATURES, build_direction_rows, direction_dataset,
                            signal_score, steady_signal, train_direction)
-from models.xgboost_model import FEATURES, VOL_TENOR, build_dataset, build_features, train
+from models.xgboost_model import FEATURES, build_dataset, build_features, train, vol_instruments
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "processed"
 CACHE = ROOT / "data" / "live_forecast_models.pkl"
 PRAGMA_DIR = ROOT / "runs" / "pragma"
+PRAGMA_DATA_DIR = DATA_DIR  # see --pragma-data
 MODELS = ("xgboost", "pragma")
 
 HORIZONS = [5, 10, 15, 20, 25, 30]  # minutes; must match frontend HORIZONS_MIN
@@ -66,7 +69,8 @@ STALE_SECONDS = 5 * 60               # no bar for this long -> no fresh data
 SIGNAL_HORIZON = 10                  # minutes: the Buy/Sell signal looks this far ahead (models.signal default)
 SIGNAL_THRESHOLD = 1.0               # expected move must beat this many predicted spreads to trade
 SIGNAL_EXIT = 0.5                    # ...and a call stays on until it drops below this many (less flicker)
-MAX_FILL_MIN = 5                     # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
+MAX_SCORING = 4                      # pairs scored at the same time at most (memory)
+MAX_FILL_MIN = 5                    # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{pair}=X?interval=1m&range=5d"
 UA = "Mozilla/5.0 (fx-forecast-server)"
 
@@ -77,11 +81,10 @@ UA = "Mozilla/5.0 (fx-forecast-server)"
 
 def train_bank() -> dict:
     """Vol and spread models for every horizon, plus per-pair constants."""
-    series = forward_series()
+    series = all_series()
     consts = {}
-    for df in series.values():
-        if df.attrs["tenor"] != VOL_TENOR:
-            continue
+    for instrument_id in sorted(vol_instruments(series)):
+        df = series[instrument_id]
         consts[df.attrs["pair"]] = {
             "attrs": dict(df.attrs),
             "spread_bp": float(df["spread_bp"].median()),
@@ -97,12 +100,23 @@ def train_bank() -> dict:
             print(f"  {target:<6} h={h:>2}min  {models[target][h].best_iteration + 1:>4} trees"
                   f"  ({time.time() - t0:.0f}s)", flush=True)
     return {"horizons": HORIZONS, "models": models, "consts": consts, "pairs": sorted(consts),
-            "direction": train_direction_model(series)}
+            "features": list(FEATURES), "direction": train_direction_model(series)}
 
 
-def forward_series() -> Dict[str, pd.DataFrame]:
+def all_series() -> Dict[str, pd.DataFrame]:
+    """Every instrument in data/processed: forwards and spot."""
     series, _ = load_processed(str(DATA_DIR))
-    return {k: v for k, v in series.items() if v.attrs["product"] == "FORWARD"}
+    return series
+
+
+def data_pairs() -> List[str]:
+    """Pairs listed in data/processed/instruments.csv (what the cached models must cover)."""
+    return sorted(pd.read_csv(DATA_DIR / "instruments.csv")["pair"].unique())
+
+
+def bank_is_current(bank: dict) -> bool:
+    return (bank.get("horizons") == HORIZONS and bank.get("features") == list(FEATURES)
+            and bank.get("pairs") == data_pairs())
 
 
 def train_direction_model(series: Dict[str, pd.DataFrame]) -> dict:
@@ -120,13 +134,15 @@ def train_direction_model(series: Dict[str, pd.DataFrame]) -> dict:
 def load_bank(retrain: bool = False) -> dict:
     if CACHE.exists() and not retrain:
         bank = pickle.loads(CACHE.read_bytes())
-        if bank.get("horizons") == HORIZONS:
+        if bank_is_current(bank):
             print(f"loaded models from {CACHE}")
             if bank.get("direction", {}).get("horizon") != SIGNAL_HORIZON:
                 print("training the direction model for the Buy/Sell signal...", flush=True)
-                bank["direction"] = train_direction_model(forward_series())
+                bank["direction"] = train_direction_model(all_series())
                 CACHE.write_bytes(pickle.dumps(bank))
             return bank
+        else:
+            print("cached models don't match data/processed (pairs or features changed)", flush=True)
     print("training XGBoost models (one-off, cached afterwards)...", flush=True)
     bank = train_bank()
     CACHE.write_bytes(pickle.dumps(bank))
@@ -217,21 +233,63 @@ class Engine:
         self.default_model = default_model
         self.lock = threading.Lock()
         self.cache: Dict[str, tuple[float, dict]] = {}
+        # One scoring per pair at a time: concurrent requests for a pair wait for it and reuse
+        # the result instead of each redoing it (replay asks every second; duplicate work used
+        # to pile up until the process ran out of memory). At most MAX_SCORING pairs at once.
+        self.pair_locks = {p: threading.Lock() for p in bank["pairs"]}
+        self.scoring = threading.Semaphore(MAX_SCORING)
+
+    def _cached(self, pair: str, max_age: float) -> Optional[dict]:
+        with self.lock:
+            hit = self.cache.get(pair)
+        return hit[1] if hit and time.time() - hit[0] < max_age else None
 
     def scored(self, pair: str, max_age: float = CACHE_SECONDS) -> dict:
         """Live bars for a pair with model forecasts on every row (cached max_age seconds)."""
-        with self.lock:
-            hit = self.cache.get(pair)
-            if hit and time.time() - hit[0] < max_age:
-                return hit[1]
+        hit = self._cached(pair, max_age)
+        if hit is not None:
+            return hit
+        with self.pair_locks[pair]:
+            hit = self._cached(pair, max_age)  # another request may have just scored it
+            if hit is not None:
+                return hit
+            with self.scoring:
+                return self._score(pair)
+
+    def refresh_all(self) -> None:
+        """Rescore every pair (MAX_SCORING at a time)."""
+        def one(pair: str) -> None:
+            try:
+                with self.pair_locks[pair], self.scoring:
+                    self._score(pair)
+            except Exception as e:
+                print(f"[refresh] {pair}: {e}", flush=True)
+        with ThreadPoolExecutor(MAX_SCORING) as ex:
+            list(ex.map(one, self.bank["pairs"]))
+
+    def start_refresher(self) -> None:
+        """Keep every pair's forecasts fresh in the background (about every CACHE_SECONDS),
+        so live requests answer from the cache at once instead of rescoring all pairs
+        (which takes longer than the page waits before asking again)."""
+        def run():
+            first = True
+            while True:
+                t0 = time.time()
+                self.refresh_all()
+                if first:
+                    print(f"all pairs scored ({time.time() - t0:.0f}s)", flush=True)
+                    first = False
+                time.sleep(max(1.0, CACHE_SECONDS - (time.time() - t0)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _score(self, pair: str) -> dict:
         c = self.bank["consts"][pair]
         spot, last_price = fetch_spot(pair)
         bars = live_bars(spot, c)
-        X = build_features(bars)
-        X["pair"] = pd.Categorical(X["pair"], categories=self.bank["pairs"])
-        X = X[FEATURES]
-        vol = {h: np.exp(m.predict(X)) for h, m in self.bank["models"]["vol"].items()}
-        spread = {h: np.exp(m.predict(X)) for h, m in self.bank["models"]["spread"].items()}
+        vol = {h: np.exp(m.predict(self._features(bars, "vol", h)))
+               for h, m in self.bank["models"]["vol"].items()}
+        spread = {h: np.exp(m.predict(self._features(bars, "spread", h)))
+                  for h, m in self.bank["models"]["spread"].items()}
         signal = self._signal(bars, vol, spread)
         ret2 = bars["ret_bp"].where(~bars["is_gap"], 0.0) ** 2
         past30 = np.sqrt(ret2.rolling(WINDOW, min_periods=WINDOW // 2).sum())  # t-29 … t
@@ -243,6 +301,12 @@ class Engine:
         with self.lock:
             self.cache[pair] = (time.time(), out)
         return out
+
+    def _features(self, bars: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
+        """Model inputs, built exactly as in training (some columns depend on target and horizon)."""
+        X = build_features(bars, target, horizon)
+        X["pair"] = pd.Categorical(X["pair"], categories=self.bank["pairs"])
+        return X[FEATURES]
 
     def _signal(self, bars: pd.DataFrame, vol: dict, spread: dict) -> Optional[dict]:
         """Buy/Sell/Hold on every row: the direction model's P(up) put through
@@ -281,7 +345,10 @@ class Engine:
     def _get(self, pair: str, as_of: Optional[pd.Timestamp], model: str = "xgboost") -> dict:
         if model == "pragma":
             return self.pragma["scored"][pair]
-        return self.scored(pair, REPLAY_CACHE_SECONDS if as_of is not None else CACHE_SECONDS)
+        # Answer from the cache, whatever its age: the background refresher keeps it fresh
+        # (live), and replay only looks at bars before its moment, which don't change.
+        # Only a pair that has never been scored is scored here.
+        return self.scored(pair, math.inf)
 
     def models(self) -> List[str]:
         return ["xgboost"] + (["pragma"] if self.pragma else [])
@@ -527,14 +594,20 @@ def main() -> int:
                    help="forecasts served when a request has no ?model= (default: xgboost)")
     p.add_argument("--pragma-dir", type=Path, default=PRAGMA_DIR,
                    help="folder with PRAGMA's saved predictions (default: runs/pragma)")
+    p.add_argument("--pragma-data", type=Path, default=PRAGMA_DATA_DIR,
+                   help="processed bars PRAGMA's predictions were made from; XGBoost always uses "
+                        "data/processed (default: data/processed, whose Challenge1 instruments "
+                        "are the ones PRAGMA was trained and tested on)")
     args = p.parse_args()
     pragma = None
     if pragma_replay.available(args.pragma_dir):
-        pragma = pragma_replay.load_pragma(DATA_DIR, args.pragma_dir, HORIZONS, WINDOW)
-        print(f"loaded PRAGMA predictions for {', '.join(pragma['pairs'])} from {args.pragma_dir}")
+        pragma = pragma_replay.load_pragma(args.pragma_data, args.pragma_dir, HORIZONS, WINDOW)
+        print(f"loaded PRAGMA predictions for {', '.join(pragma['pairs'])} from {args.pragma_dir} "
+              f"(bars from {args.pragma_data})", flush=True)
     elif args.model == "pragma":
         p.error(f"no PRAGMA predictions in {args.pragma_dir}; run: {pragma_replay.DOWNLOAD}")
     engine = Engine(load_bank(args.retrain), pragma, args.model)
+    engine.start_refresher()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(engine))
     print(f"serving {args.model} forecasts by default ({', '.join(engine.models())} available) "
           f"on http://localhost:{args.port}/api/snapshot", flush=True)
