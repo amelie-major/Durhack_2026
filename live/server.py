@@ -8,9 +8,13 @@ Run from the repo root::
     python -m live.server --retrain  # rebuild the cached models first
 
 Endpoints
-    GET /api/snapshot?base=USD
-    GET /api/history?pair=USDJPY&hours=120
+    GET /api/snapshot?base=USD[&asOf=2026-11-13T14:30:00Z]
+    GET /api/history?pair=USDJPY&hours=120[&asOf=...]
+    GET /api/replay-range
     GET /api/health
+
+With ``asOf`` the server time-travels: it answers as it would have at that
+moment, using only bars at or before it (replay mode in the frontend).
 
 Yahoo gives spot mid OHLC only (no bid/ask, no forward points), so each pair's
 live 1M-forward bar is built from the live spot price plus that instrument's
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pickle
 import threading
 import time
@@ -45,6 +50,9 @@ CACHE = ROOT / "data" / "live_forecast_models.pkl"
 HORIZONS = [5, 10, 15, 20, 25, 30]  # minutes; must match frontend HORIZONS_MIN
 WINDOW = 30                          # realised-vol window (minutes)
 CACHE_SECONDS = 15                   # how often Yahoo is re-fetched at most
+REPLAY_CACHE_SECONDS = 600           # replay re-uses the same bars so the timeline stays put
+REPLAY_HOURS = 24                    # "the last day of data"
+STALE_SECONDS = 5 * 60               # no bar for this long -> no fresh data
 MAX_FILL_MIN = 5                     # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{pair}=X?interval=1m&range=5d"
 UA = "Mozilla/5.0 (fx-forecast-server)"
@@ -124,9 +132,25 @@ def fill_short_holes(spot: pd.DataFrame) -> pd.DataFrame:
     return full
 
 
+def unflatten(df: pd.DataFrame) -> pd.DataFrame:
+    """Yahoo's EURUSD bars come with open = high = low = close, which makes every bar's
+    range 0 and the model (which leans on recent ranges) forecast almost no movement.
+    For such flat bars, open from the previous close and span open..close instead, so a
+    bar's range is at least the move it made. Bars with a real range are left alone."""
+    flat = df["high_mid"] <= df["low_mid"]
+    if not flat.any():
+        return df
+    df = df.copy()
+    prev = df["close_mid"].shift(1).fillna(df["close_mid"])
+    df.loc[flat, "open_mid"] = prev[flat]
+    df.loc[flat, "high_mid"] = np.maximum(prev, df["close_mid"])[flat]
+    df.loc[flat, "low_mid"] = np.minimum(prev, df["close_mid"])[flat]
+    return df
+
+
 def live_bars(spot: pd.DataFrame, c: dict) -> pd.DataFrame:
     """Spot mid bars -> 1M-forward bars with the loader's columns and features."""
-    df = fill_short_holes(spot)
+    df = unflatten(fill_short_holes(spot))
     mid = df["close_mid"]
     half = mid * c["spread_bp"] / 2e4
     df["close_bid"] = mid - half
@@ -141,7 +165,7 @@ def live_bars(spot: pd.DataFrame, c: dict) -> pd.DataFrame:
 
 
 def status_of(last_bar: pd.Timestamp, now: pd.Timestamp) -> str:
-    wd, h = now.dayofweek, now.hour  # Monday = 0
+    wd, h = now.day_of_week, now.hour  # Monday = 0
     if wd == 5 or (wd == 6 and h < 21) or (wd == 4 and h >= 22):
         return "thin"
     mins = h * 60 + now.minute
@@ -158,11 +182,11 @@ class Engine:
         self.lock = threading.Lock()
         self.cache: Dict[str, tuple[float, dict]] = {}
 
-    def scored(self, pair: str) -> dict:
-        """Live bars for a pair with model forecasts on every row (cached CACHE_SECONDS)."""
+    def scored(self, pair: str, max_age: float = CACHE_SECONDS) -> dict:
+        """Live bars for a pair with model forecasts on every row (cached max_age seconds)."""
         with self.lock:
             hit = self.cache.get(pair)
-            if hit and time.time() - hit[0] < CACHE_SECONDS:
+            if hit and time.time() - hit[0] < max_age:
                 return hit[1]
         c = self.bank["consts"][pair]
         spot, last_price = fetch_spot(pair)
@@ -189,13 +213,36 @@ class Engine:
             return 0.5
         return float(np.clip(np.searchsorted(sorted_hist, x) / len(sorted_hist), 0.01, 0.99))
 
-    def pair_snapshot(self, pair: str, now: pd.Timestamp) -> dict:
-        s = self.scored(pair)
-        bars, i = s["bars"], len(s["bars"]) - 1
+    def _get(self, pair: str, as_of: Optional[pd.Timestamp]) -> dict:
+        return self.scored(pair, REPLAY_CACHE_SECONDS if as_of is not None else CACHE_SECONDS)
+
+    @staticmethod
+    def _row_at(ts: pd.Series, t: pd.Timestamp) -> int:
+        """Index of the last bar at or before t (-1 if none)."""
+        return int(ts.searchsorted(t, side="right")) - 1
+
+    @staticmethod
+    def _hist(s: dict, k: Optional[int]) -> np.ndarray:
+        """Sorted 30-min forecasts the percentile is ranked against. In replay only rows
+        up to k count, so nothing after the simulated "now" leaks in."""
+        if k is None:
+            return s["hist30"]
+        v = s["vol"][HORIZONS[-1]][: k + 1]
+        return np.sort(v[~np.isnan(v)])
+
+    def pair_snapshot(self, pair: str, now: pd.Timestamp, as_of: Optional[pd.Timestamp] = None) -> dict:
+        s = self._get(pair, as_of)
+        bars = s["bars"]
         c = self.bank["consts"][pair]["attrs"]
+        if as_of is None:
+            i, mid, hist = len(bars) - 1, s["last_price"], s["hist30"]
+        else:
+            i = self._row_at(bars["timestamp"], as_of)
+            if i < 0:
+                raise LookupError(f"no bars at or before {as_of}")
+            mid, hist = float(bars["close_mid"].iloc[i]), self._hist(s, i)
         vol = [round(float(s["vol"][h][i]), 3) for h in HORIZONS]
         spr = [round(float(s["spread"][h][i]), 3) for h in HORIZONS]
-        mid = s["last_price"]
         spread_now = spr[0]
         half = mid * spread_now / 2e4
         rv30 = float(s["past30"].iloc[i])
@@ -206,57 +253,109 @@ class Engine:
             "forecast": {"horizonsMin": HORIZONS, "vol": vol, "spreadBps": spr,
                          "volLow": [round(v * 0.75, 3) for v in vol],
                          "volHigh": [round(v * 1.3, 3) for v in vol]},
-            "percentile": round(self._pct(s["hist30"], vol[-1]), 3),
-            "volNormal30m": round(float(np.median(s["hist30"])), 3) if len(s["hist30"]) else None,
+            "percentile": round(self._pct(hist, vol[-1]), 3),
+            "volNormal30m": round(float(np.median(hist)), 3) if len(hist) else None,
             "status": status_of(bars["timestamp"].iloc[i], now),
         }
 
-    def snapshot(self, base: str) -> dict:
-        now = pd.Timestamp.now(tz="UTC")
+    def snapshot(self, base: str, as_of: Optional[pd.Timestamp] = None) -> dict:
+        now = as_of if as_of is not None else pd.Timestamp.now(tz="UTC")
         pairs, newest = [], None
         for pair in self.bank["pairs"]:
             try:
-                pairs.append(self.pair_snapshot(pair, now))
-                last = self.scored(pair)["bars"]["timestamp"].iloc[-1]
+                pairs.append(self.pair_snapshot(pair, now, as_of))
+                ts = self._get(pair, as_of)["bars"]["timestamp"]
+                last = ts.iloc[-1] if as_of is None else ts.iloc[self._row_at(ts, as_of)]
                 newest = last if newest is None or last > newest else newest
             except Exception as e:  # one pair failing shouldn't blank the map
                 print(f"[snapshot] {pair}: {e}", flush=True)
         if not pairs:
             raise RuntimeError("no pairs could be scored")
-        iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
         return {"asOf": iso(now), "base": base, "lastUpdated": iso(newest), "pairs": pairs}
 
-    def history(self, pair: str, hours: float, step_min: int = 5) -> Optional[dict]:
+    def history(self, pair: str, hours: float, step_min: int = 5,
+                as_of: Optional[pd.Timestamp] = None) -> Optional[dict]:
         if pair not in self.bank["consts"]:
             return None
-        s = self.scored(pair)
+        s = self._get(pair, as_of)
         bars = s["bars"]
         c = self.bank["consts"][pair]["attrs"]
         h = HORIZONS[-1]
         ts = bars["timestamp"]
-        end = pd.Timestamp.now(tz="UTC").floor(f"{step_min}min")
+        now = as_of if as_of is not None else pd.Timestamp.now(tz="UTC")
+        end = now.floor(f"{step_min}min")
         grid = pd.date_range(end - pd.Timedelta(hours=hours), end, freq=f"{step_min}min")
         idx = ts.searchsorted(grid, side="right") - 1  # last bar at or before each step
+        hist = self._hist(s, None if as_of is None else self._row_at(ts, as_of))
+        horizon = pd.Timedelta(minutes=h)
         points: List[dict] = []
         for t, k in zip(grid, idx):
-            iso = t.strftime("%Y-%m-%dT%H:%M:%SZ")
-            if k < 0 or (t - ts.iloc[k]).total_seconds() > 5 * 60:
-                points.append({"t": iso, "mid": None, "spreadBps": None, "volForecast": None,
+            if k < 0 or (t - ts.iloc[k]).total_seconds() > STALE_SECONDS:
+                points.append({"t": iso(t), "mid": None, "spreadBps": None, "volForecast": None,
                                "volActual": None, "percentile": None, "status": "no_data"})
                 continue
             fc = float(s["vol"][h][k])
             act = s["next30"].iloc[k]
+            # what actually happened is only known once its window has fully passed
+            known = not pd.isna(act) and ts.iloc[k] + horizon <= now
             points.append({
-                "t": iso, "mid": float(bars["close_mid"].iloc[k]),
+                "t": iso(t), "mid": float(bars["close_mid"].iloc[k]),
                 "spreadBps": round(float(s["spread"][HORIZONS[0]][k]), 3),
                 "volForecast": round(fc, 3), "volForecastLow": round(fc * 0.75, 3),
                 "volForecastHigh": round(fc * 1.3, 3),
-                "volActual": None if pd.isna(act) else round(float(act), 3),
-                "percentile": round(self._pct(s["hist30"], fc), 3),
+                "volActual": round(float(act), 3) if known else None,
+                "percentile": round(self._pct(hist, fc), 3),
                 "status": "rollover" if bool(bars["is_gap"].iloc[k]) else "live",
             })
         return {"pair": pair, "base": c["base"], "quote": c["quote"], "stepMin": step_min,
                 "horizonMin": h, "points": points}
+
+    def replay_range(self) -> dict:
+        """The last REPLAY_HOURS of bars that every pair has: where replay starts and ends."""
+        lasts = []
+        for pair in self.bank["pairs"]:
+            try:
+                lasts.append(last_busy_bar(self.scored(pair, REPLAY_CACHE_SECONDS)["bars"]["timestamp"]))
+            except Exception as e:
+                print(f"[replay-range] {pair}: {e}", flush=True)
+        if not lasts:
+            raise RuntimeError("no pairs could be scored")
+        end = min(lasts)
+        return {"start": iso(end - pd.Timedelta(hours=REPLAY_HOURS)), "end": iso(end), "stepMin": 1}
+
+
+def last_busy_bar(ts: pd.Series) -> pd.Timestamp:
+    """Newest bar that isn't a lone straggler after a gap. Once the market shuts Yahoo adds
+    a single closing bar hours after the last real one; replay should end on real trading."""
+    i = len(ts) - 1
+    while i > 0 and (ts.iloc[i] - ts.iloc[i - 1]).total_seconds() > STALE_SECONDS:
+        i -= 1
+    return ts.iloc[i]
+
+
+def iso(t: pd.Timestamp) -> str:
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_as_of(text: Optional[str]) -> Optional[pd.Timestamp]:
+    """'2026-11-13T14:30:00Z' -> UTC Timestamp; None when absent. Raises ValueError if malformed."""
+    if not text:
+        return None
+    t = pd.Timestamp(text)
+    if pd.isna(t):
+        raise ValueError(f"bad asOf: {text!r}")
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
+def json_safe(x):
+    """NaN / inf are not valid JSON (the browser's JSON.parse rejects them) -> null."""
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [json_safe(v) for v in x]
+    return x
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +365,7 @@ class Engine:
 def make_handler(engine: Engine):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code: int, body) -> None:
-            data = json.dumps(body).encode()
+            data = json.dumps(json_safe(body), allow_nan=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -282,12 +381,17 @@ def make_handler(engine: Engine):
                 if url.path == "/api/health":
                     self._send(200, {"ok": True, "pairs": engine.bank["pairs"], "horizons": HORIZONS})
                 elif url.path == "/api/snapshot":
-                    self._send(200, engine.snapshot(q.get("base", "USD")))
+                    self._send(200, engine.snapshot(q.get("base", "USD"), parse_as_of(q.get("asOf"))))
                 elif url.path == "/api/history":
-                    hist = engine.history(q.get("pair", ""), float(q.get("hours", 24)))
+                    hist = engine.history(q.get("pair", ""), float(q.get("hours", 24)),
+                                          as_of=parse_as_of(q.get("asOf")))
                     self._send(200 if hist else 404, hist or {"error": "unknown pair"})
+                elif url.path == "/api/replay-range":
+                    self._send(200, engine.replay_range())
                 else:
                     self._send(404, {"error": "not found"})
+            except ValueError as e:  # bad asOf / hours
+                self._send(400, {"error": str(e)})
             except Exception as e:
                 print(f"[error] {url.path}: {e!r}", flush=True)
                 self._send(502, {"error": str(e)})

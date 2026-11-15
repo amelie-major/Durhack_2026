@@ -75,6 +75,13 @@ export interface PairHistory {
   points: HistoryPoint[] // oldest first, last point = asOf
 }
 
+/** Replay: the stretch of past data that can be played back (the last day we have bars for) */
+export interface ReplayRange {
+  start: string // ISO timestamp
+  end: string // ISO timestamp — the newest bar every pair has
+  stepMin: number // smallest step, 1 = one-minute bars
+}
+
 /** UI-side derived types */
 export type StormLevel = 'calm' | 'unsettled' | 'storm' | 'extreme' | 'nodata' // 'extreme' added in v3
 export type Tolerance = 'relaxed' | 'balanced' | 'cautious'

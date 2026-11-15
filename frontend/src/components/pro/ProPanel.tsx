@@ -39,6 +39,7 @@ import { useAppStore } from '../../store/useAppStore'
 import type { PairHistory, PairSnapshot, PairStatus, Tolerance } from '../../types'
 
 const HISTORY_HOURS = 120 // 5 days: enough for the "usual busy hours" view
+const HISTORY_STEP_MS = 5 * 60_000
 const RANGES = [3, 12, 24] as const
 type RangeH = (typeof RANGES)[number]
 
@@ -241,26 +242,30 @@ export default function ProPanel() {
   const amount = useAppStore((s) => s.amount)
   const tolerance = useAppStore((s) => s.tolerance)
   const setTolerance = useAppStore((s) => s.setTolerance)
+  const replaying = useAppStore((s) => s.replay !== null)
 
   const legs = useMemo(() => routePairs(snapshot, base, quote), [snapshot, base, quote])
   const [picked, setPicked] = useState<string | null>(null)
   const pair = legs.find((p) => p.pair === picked) ?? worstLeg(legs, tolerance)
   const [rangeH, setRangeH] = useState<RangeH>(12)
 
+  const nowMs = new Date(asOf).getTime()
+  const historyStep = Math.floor(nowMs / HISTORY_STEP_MS)
+
   // Load 5 days of history for the selected pair
   const [history, setHistory] = useState<PairHistory | null>(null)
   useEffect(() => {
     if (!pair) return
     let cancelled = false
-    getHistory(pair.pair, asOf, HISTORY_HOURS)
+    getHistory(pair.pair, asOf, HISTORY_HOURS, replaying)
       .then((h) => !cancelled && setHistory(h))
       .catch((err: unknown) => console.error('[data] could not load history', err))
     return () => {
       cancelled = true
     }
-  }, [pair?.pair, asOf]) // eslint-disable-line react-hooks/exhaustive-deps
+    // History has one point per 5 min, so in replay it only reloads when asOf enters a new 5-min step
+  }, [pair?.pair, replaying ? historyStep : asOf, replaying]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const nowMs = new Date(asOf).getTime()
   const shown = useMemo(() => {
     if (!history || history.pair !== pair?.pair) return []
     const from = nowMs - rangeH * 3_600_000
