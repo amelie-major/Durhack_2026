@@ -3,7 +3,7 @@
  * Replay: `replay` is set while the app plays back through the last day of data instead of live.
  */
 import { create } from 'zustand'
-import type { CurrencyCode, MapLayer, ReplayRange, Snapshot, Tolerance, ViewMode } from '../types'
+import type { CurrencyCode, ForecastModel, MapLayer, ReplayRange, Snapshot, Tolerance, ViewMode } from '../types'
 import { HOME_CURRENCY, ZONES, type CurrencyZone } from '../data/currencies'
 import { USING_LIVE_DATA } from '../data/api'
 
@@ -46,9 +46,11 @@ interface AppState {
 
   /** Set while replaying the last day; null = live. In replay, asOf is the replayed moment. */
   replay: ReplayState | null
-  /** Start playing from the beginning of the range */
-  startReplay: (range: ReplayRange) => void
-  /** Back to live data */
+  /** Whose forecasts are shown. PRAGMA only exists as a replay, so it is set by startReplay. */
+  model: ForecastModel
+  /** Start playing from the beginning of the range (of `model`'s data; default: the current model) */
+  startReplay: (range: ReplayRange, model?: ForecastModel) => void
+  /** Back to live data (and so to XGBoost: PRAGMA has no live data) */
   exitReplay: () => void
   setReplayPlaying: (playing: boolean) => void
   setReplaySpeed: (speed: ReplaySpeed) => void
@@ -112,12 +114,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
     })),
 
   replay: null,
-  startReplay: ({ start, end }) => {
+  model: 'xgboost',
+  startReplay: ({ start, end }, model) => {
     if (!(ms(end) > ms(start))) return // empty or malformed range: stay live
-    set({ replay: { start, end, playing: true, speed: 5 }, asOf: start, live: false, snapshot: null })
+    set((s) => ({ replay: { start, end, playing: true, speed: 5 }, asOf: start, live: false, snapshot: null, model: model ?? s.model }))
   },
   exitReplay: () =>
-    set({ replay: null, live: true, snapshot: null, asOf: USING_LIVE_DATA ? nowIso() : DEMO_AS_OF, nextUpdateAt: Date.now() + UPDATE_EVERY_MS }),
+    set({ replay: null, live: true, model: 'xgboost', snapshot: null, asOf: USING_LIVE_DATA ? nowIso() : DEMO_AS_OF, nextUpdateAt: Date.now() + UPDATE_EVERY_MS }),
   setReplayPlaying: (playing) =>
     set((s) => {
       if (!s.replay) return {}

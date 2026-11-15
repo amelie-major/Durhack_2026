@@ -244,6 +244,7 @@ export default function ProPanel() {
   const tolerance = useAppStore((s) => s.tolerance)
   const setTolerance = useAppStore((s) => s.setTolerance)
   const replaying = useAppStore((s) => s.replay !== null)
+  const model = useAppStore((s) => s.model)
 
   const legs = useMemo(() => routePairs(snapshot, base, quote), [snapshot, base, quote])
   const [picked, setPicked] = useState<string | null>(null)
@@ -258,14 +259,14 @@ export default function ProPanel() {
   useEffect(() => {
     if (!pair) return
     let cancelled = false
-    getHistory(pair.pair, asOf, HISTORY_HOURS, replaying)
+    getHistory(pair.pair, asOf, HISTORY_HOURS, replaying, model)
       .then((h) => !cancelled && setHistory(h))
       .catch((err: unknown) => console.error('[data] could not load history', err))
     return () => {
       cancelled = true
     }
     // History has one point per 5 min, so in replay it only reloads when asOf enters a new 5-min step
-  }, [pair?.pair, replaying ? historyStep : asOf, replaying]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pair?.pair, replaying ? historyStep : asOf, replaying, model]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const shown = useMemo(() => {
     if (!history || history.pair !== pair?.pair) return []

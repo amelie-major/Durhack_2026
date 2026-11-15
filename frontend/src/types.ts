@@ -104,5 +104,7 @@ export interface ReplayRange {
 export type StormLevel = 'calm' | 'unsettled' | 'storm' | 'extreme' | 'nodata' // 'extreme' added in v3
 export type Tolerance = 'relaxed' | 'balanced' | 'cautious'
 export type ViewMode = 'simple' | 'pro'
+/** Whose forecasts are shown. PRAGMA is saved predictions for its test week, so it is always a replay. */
+export type ForecastModel = 'xgboost' | 'pragma'
 /** What the globe colours show */
 export type MapLayer = 'volatility' | 'signal'

@@ -7,10 +7,13 @@
  *   yahoo           — live Yahoo bars with a simple in-browser vol estimate (src/data/yahoo.ts)
  *   mock            — deterministic sample data (src/data/mock.ts)
  *
+ * MODEL: `model` picks the forecasts the server returns, XGBoost (live) or PRAGMA (saved predictions for
+ * its test week, replay only). PRAGMA never falls back to Yahoo: that would show numbers that are not PRAGMA's.
+ *
  * REPLAY: pass `replay = true` and the data is what it looked like AT `asOf` (nothing later),
  * so the app can play back through the last day. getReplayRange() says which day that is.
  */
-import type { CurrencyCode, PairHistory, ReplayRange, Snapshot } from '../types'
+import type { CurrencyCode, ForecastModel, PairHistory, ReplayRange, Snapshot } from '../types'
 import { mockHistory, mockSnapshot } from './mock'
 import { liveHistory, liveReplayRange, liveSnapshot } from './yahoo'
 
@@ -27,7 +30,8 @@ async function fromServer<T>(path: string): Promise<T> {
 }
 
 let warned = false
-function fallback(err: unknown) {
+function fallback(err: unknown, model: ForecastModel) {
+  if (model === 'pragma') throw err
   if (!warned) console.warn('[data] model server unavailable, using in-browser Yahoo estimate:', err)
   warned = true
 }
@@ -35,41 +39,59 @@ function fallback(err: unknown) {
 /** "&asOf=…" in replay, nothing when live (the server then uses the real now) */
 const at = (asOf: string, replay: boolean) => (replay ? `&asOf=${encodeURIComponent(asOf)}` : '')
 
-export async function getSnapshot(asOf: string, base: CurrencyCode, replay = false): Promise<Snapshot> {
+/** Which models the forecast server can serve, and the one it was started with (`--model`) */
+export async function getModelInfo(): Promise<{ models: ForecastModel[]; defaultModel: ForecastModel }> {
+  if (SOURCE !== 'model') return { models: ['xgboost'], defaultModel: 'xgboost' }
+  const health = await fromServer<{ models?: ForecastModel[]; defaultModel?: ForecastModel }>('/api/health')
+  return { models: health.models ?? ['xgboost'], defaultModel: health.defaultModel ?? 'xgboost' }
+}
+
+export async function getSnapshot(
+  asOf: string,
+  base: CurrencyCode,
+  replay = false,
+  model: ForecastModel = 'xgboost',
+): Promise<Snapshot> {
   if (SOURCE === 'mock') return mockSnapshot(asOf, base)
   if (SOURCE === 'model') {
     try {
-      return await fromServer<Snapshot>(`/api/snapshot?base=${encodeURIComponent(base)}${at(asOf, replay)}`)
+      return await fromServer<Snapshot>(`/api/snapshot?base=${encodeURIComponent(base)}&model=${model}${at(asOf, replay)}`)
     } catch (err) {
-      fallback(err)
+      fallback(err, model)
     }
   }
   return liveSnapshot(base, replay ? asOf : undefined)
 }
 
 /** The stretch of time replay plays through: the last 24 h that we have data for */
-export async function getReplayRange(nowIso: string): Promise<ReplayRange> {
+export async function getReplayRange(nowIso: string, model: ForecastModel = 'xgboost'): Promise<ReplayRange> {
   if (SOURCE === 'mock') {
     return { start: new Date(new Date(nowIso).getTime() - 24 * 3_600_000).toISOString().replace('.000Z', 'Z'), end: nowIso, stepMin: 1 }
   }
   if (SOURCE === 'model') {
     try {
-      return await fromServer<ReplayRange>('/api/replay-range')
+      return await fromServer<ReplayRange>(`/api/replay-range?model=${model}`)
     } catch (err) {
-      fallback(err)
+      fallback(err, model)
     }
   }
   return liveReplayRange()
 }
 
 /** Past history of one pair up to asOf (Pro view): forecasts, what actually happened, spread, rate. */
-export async function getHistory(pair: string, asOf: string, hours: number, replay = false): Promise<PairHistory | null> {
+export async function getHistory(
+  pair: string,
+  asOf: string,
+  hours: number,
+  replay = false,
+  model: ForecastModel = 'xgboost',
+): Promise<PairHistory | null> {
   if (SOURCE === 'mock') return mockHistory(pair, asOf, hours)
   if (SOURCE === 'model') {
     try {
-      return await fromServer<PairHistory>(`/api/history?pair=${encodeURIComponent(pair)}&hours=${hours}${at(asOf, replay)}`)
+      return await fromServer<PairHistory>(`/api/history?pair=${encodeURIComponent(pair)}&hours=${hours}&model=${model}${at(asOf, replay)}`)
     } catch (err) {
-      fallback(err)
+      fallback(err, model)
     }
   }
   return liveHistory(pair, hours, replay ? asOf : undefined)

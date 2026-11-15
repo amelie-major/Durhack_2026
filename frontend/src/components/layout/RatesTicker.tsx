@@ -8,6 +8,7 @@ import { useMemo } from 'react'
 import { USING_SAMPLE_DATA } from '../../data/api'
 import LayerToggle from './LayerToggle'
 import ModeToggle from './ModeToggle'
+import ModelToggle from './ModelToggle'
 import NextUpdate from './NextUpdate'
 import { decimalsFor } from '../../data/mock'
 import { actionFor, SIGNAL_INFO } from '../../lib/signal'
@@ -104,6 +105,7 @@ export default function RatesTicker() {
         <NextUpdate />
       </span>
       <span className="flex shrink-0 items-center gap-1.5 border-l border-panel-border px-2">
+        <ModelToggle />
         <LayerToggle />
         <ModeToggle />
       </span>

@@ -37,8 +37,8 @@ export default function ReplayBar() {
     const begin = () => {
       setLoading(true)
       setError(null)
-      getReplayRange(asOf)
-        .then(startReplay)
+      getReplayRange(asOf, useAppStore.getState().model)
+        .then((range) => startReplay(range))
         .catch((err: unknown) => {
           console.error('[data] could not start replay', err)
           setError('Replay is not available right now')
