@@ -94,8 +94,10 @@ export default function RatesTicker() {
         )}
         <NextUpdate />
       </span>
-      <span className="flex shrink-0 items-center gap-1.5 border-l border-panel-border px-2">
+      <span className="flex shrink-0 items-center gap-1.5 border-l border-panel-border px-3">
         <LayerToggle />
+      </span>
+      <span className="flex shrink-0 items-center border-l border-panel-border px-2">
         <ModeToggle />
       </span>
     </div>

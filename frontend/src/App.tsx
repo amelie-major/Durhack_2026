@@ -73,24 +73,20 @@ export default function App() {
         <RatesTicker />
       </header>
 
-      {/* Bright red warning when any pair is "Extreme" (≥ 1.5× its normal move) */}
-      <div
-        className={`pointer-events-none absolute top-15 left-3 flex justify-center [&>*]:pointer-events-auto ${
-          mode === 'pro' ? 'right-[400px]' : 'right-3'
-        }`}
-      >
-        <ExtremeAlert />
-      </div>
-
-      {/* Bottom-left: convert card */}
-      <div className="absolute bottom-3 left-3">
-        <ConvertCard />
+      {/* Left column: Extreme alerts (top, shrinks / scrolls to fit) above the convert card (bottom) */}
+      <div className="pointer-events-none absolute top-15 bottom-3 left-3 flex flex-col justify-end gap-3 [&>*]:pointer-events-auto">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ExtremeAlert />
+        </div>
+        <div className="shrink-0">
+          <ConvertCard />
+        </div>
       </div>
 
       {/* Bottom-centre: replay the last day (kept clear of the Pro panel) */}
       <div
-        className={`pointer-events-none absolute bottom-3 left-3 flex justify-center [&>*]:pointer-events-auto ${
-          mode === 'pro' ? 'right-[400px]' : 'right-3'
+        className={`pointer-events-none absolute bottom-3 left-[300px] flex justify-center [&>*]:pointer-events-auto ${
+          mode === 'pro' ? 'right-[400px]' : 'right-[344px]'
         }`}
       >
         <ReplayBar />

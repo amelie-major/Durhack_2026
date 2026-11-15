@@ -10,9 +10,11 @@
  * - Lit zones are coloured by their volatility level vs the "From" currency (Calm / Unsettled / Storm);
  *   the "From" currency's own zone is the accent colour; zones with no usable data are slate.
  * - "Extreme" zones (forecast ≥ 1.5× normal) are bright red with pulsing warning rings.
- * - A line (arc) joins the two countries of every pair we have data for.
+ * - Lines (arcs) are kept few so the globe stays readable: your From → To route (or its two legs via USD),
+ *   the route to the country you hover, and (Buy / Sell layer) your currency's active buy/sell pairs.
  * - Map layer toggle: "Volatility" (above) or "Buy / Sell": zones and lines go green (buy), red (sell)
- *   or grey (hold) from the model's signal, with pulsing rings at both ends while a buy/sell is on.
+ *   or grey (hold) from the model's signal READ FROM YOUR "From" CURRENCY (green Japan = buy JPY with
+ *   your USD), with a pulsing ring on each country where a buy/sell is on.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Globe, { type GlobeMethods } from 'react-globe.gl'
@@ -20,11 +22,18 @@ import { POINT_MARKERS, ZONES, ZONE_BY_COUNTRY, type CurrencyZone, type PointMar
 import { countryCode, escapeHtml, type CountryFeature } from '../../lib/geo'
 import { usePrefersReducedMotion, useWindowSize } from '../../lib/hooks'
 import { slashPair } from '../../lib/pro'
-import { actionFor, signalDetail, signalHeadline } from '../../lib/signal'
+import {
+  actionFor,
+  SIGNAL_DISCLAIMER,
+  signalFrom,
+  signalFromDetail,
+  signalFromMeaning,
+  signalFromTitle,
+} from '../../lib/signal'
 import { costBand, costRatioPct, LEVEL_INFO, levelFor, volRatio } from '../../lib/storm'
 import { cssVar, withAlpha } from '../../lib/theme'
-import { findPair, zoneLevel, type ZoneLevel } from '../../lib/zones'
-import type { MapLayer, PairSnapshot, Snapshot } from '../../types'
+import { findPair, routeLegs, zoneLevel, type ZoneLevel } from '../../lib/zones'
+import type { CurrencyCode, MapLayer, PairSnapshot, Snapshot } from '../../types'
 import { useAppStore } from '../../store/useAppStore'
 
 const RESUME_SPIN_AFTER_MS = 3000
@@ -32,6 +41,8 @@ const FLY_MS = 1200
 const SPIN_SPEED = 0.35
 const START_VIEW = { lat: 22, lng: 20, altitude: 2.4 }
 const FOCUS_ALTITUDE = 1.9
+/** px: the globe area starts under the top bar (matches `top-12`) */
+const GLOBE_TOP_OFFSET = 48
 
 /** Stable arc geometry between two currency zones (never recreated on timeframe ticks) */
 interface StableArc {
@@ -55,17 +66,17 @@ interface StableRing {
 
 const ZONE_BY_CODE = new Map(ZONES.map((z) => [z.code, z]))
 
-function signalLines(pair: PairSnapshot | undefined): string[] {
-  if (!pair) return ['No signal: no direct pair with your "From" currency']
-  const headline = signalHeadline(pair)
-  if (!headline) return ['No signal (forecast server offline)']
-  const detail = signalDetail(pair)
-  return detail ? [headline, detail] : [headline]
+/** Tooltip lines for the Buy / Sell layer, said from the currency you hold (`from`) */
+function signalLines(pair: PairSnapshot | undefined, from: CurrencyCode): string[] {
+  if (!pair) return [`No signal: no direct pair with ${from}`]
+  const view = signalFrom(pair, from)
+  if (!view) return ['No signal right now (forecast server offline)']
+  return [`${signalFromTitle(view)} · ${signalFromMeaning(view)}`, signalFromDetail(view), SIGNAL_DISCLAIMER]
 }
 
-function arcTooltip(pair: PairSnapshot, layer: MapLayer, level: ZoneLevel): string {
+function arcTooltip(pair: PairSnapshot, layer: MapLayer, level: ZoneLevel, from: CurrencyCode): string {
   const lines: string[] = []
-  if (layer === 'signal') lines.push(...signalLines(pair))
+  if (layer === 'signal') lines.push(...signalLines(pair, from))
   else if (level === 'nodata' || level === 'home') lines.push('No reliable data right now')
   else lines.push(`${LEVEL_INFO[level].name} · ${LEVEL_INFO[level].volatility.toLowerCase()} (next 30 min)`)
   const body = lines.map((l) => `<span>${escapeHtml(l)}</span>`).join('')
@@ -83,7 +94,7 @@ function tooltipHtml(
   const lines: string[] = []
   if (!zone) lines.push('No forecast for this country')
   else if (level === 'home') lines.push(`${zone.code} · your "From" currency`)
-  else if (layer === 'signal') lines.push(...signalLines(findPair(snapshot, from, zone.code)))
+  else if (layer === 'signal') lines.push(...signalLines(findPair(snapshot, from, zone.code), from))
   else if (!level || level === 'nodata') lines.push(`${zone.code} · no reliable data right now`)
   else {
     const info = LEVEL_INFO[level]
@@ -108,6 +119,7 @@ export default function FxGlobe() {
   const snapshot = useAppStore((s) => s.snapshot)
   const tolerance = useAppStore((s) => s.tolerance)
   const mapLayer = useAppStore((s) => s.mapLayer)
+  const alertPair = useAppStore((s) => s.alertPair)
   const setQuote = useAppStore((s) => s.setQuote)
   const focus = useAppStore((s) => s.focus)
   const selectCountry = useAppStore((s) => s.selectCountry)
@@ -135,13 +147,23 @@ export default function FxGlobe() {
       calm: cssVar('--color-calm', '#2dd4bf'),
       unsettled: cssVar('--color-unsettled', '#fbbf24'),
       storm: cssVar('--color-storm', '#f43f8e'),
-      extreme: cssVar('--color-extreme', '#ff2e3b'),
+      extreme: cssVar('--color-extreme', '#ef4444'),
       buy: cssVar('--color-buy', '#22c55e'),
       sell: cssVar('--color-sell', '#ef4444'),
       hold: cssVar('--color-hold', '#94a3b8'),
     }),
     [],
   )
+
+  // Pair picked in the Extreme alert list: its two currency zones (drawn bright red, on either layer)
+  const alertZones = useMemo(() => {
+    const p = alertPair ? snapshot?.pairs.find((x) => x.pair === alertPair) : undefined
+    return new Set<string>(p ? [p.base, p.quote] : [])
+  }, [alertPair, snapshot])
+  const alertArcId = useMemo(() => {
+    const p = alertPair ? snapshot?.pairs.find((x) => x.pair === alertPair) : undefined
+    return p ? `${p.base}-${p.quote}` : null
+  }, [alertPair, snapshot])
 
   // Volatility level of each currency zone, seen from the "From" currency
   const zoneLevels = useMemo(
@@ -167,17 +189,49 @@ export default function FxGlobe() {
     [colors],
   )
 
+  /** Buy / Sell layer, read from the currency you hold: green = buy the other currency with it */
+  const fromSignalColor = useCallback(
+    (pair: PairSnapshot | undefined, from: CurrencyCode) => {
+      const view = signalFrom(pair, from)
+      return view ? colors[view.action] : colors.nodata
+    },
+    [colors],
+  )
+
   /** Colour for a country code, or null if it isn't in a currency zone */
   const zoneColor = useCallback(
     (code: string) => {
       const zone = ZONE_BY_COUNTRY.get(code)
       if (!zone) return null
+      if (alertZones.has(zone.code)) return colors.extreme
       if (mapLayer === 'volatility') return levelColor(zoneLevels.get(zone.code))
-      // Buy / Sell: the signal of this zone's pair with the "From" currency (same colour as its line)
-      return zone.code === base ? colors.accent : signalColor(findPair(snapshot, base, zone.code))
+      // Buy / Sell: this zone's currency seen from the "From" currency (same colour as its line)
+      return zone.code === base ? colors.accent : fromSignalColor(findPair(snapshot, base, zone.code), base)
     },
-    [levelColor, zoneLevels, mapLayer, base, colors, signalColor, snapshot],
+    [levelColor, zoneLevels, mapLayer, base, colors, fromSignalColor, snapshot, alertZones],
   )
+
+  // Which lines to draw, each with the currency held on that leg (so its Buy / Sell colour reads from your side):
+  // your route, the route to the hovered country, and (Buy / Sell) your currency's active buy/sell pairs
+  const hoveredZone = hoveredCode ? (ZONE_BY_COUNTRY.get(hoveredCode)?.code ?? null) : null
+  const arcFrom = useMemo(() => {
+    const m = new Map<string, CurrencyCode>()
+    const add = (to: CurrencyCode | null) => {
+      if (!to) return
+      for (const leg of routeLegs(snapshot, base, to)) m.set(`${leg.pair.base}-${leg.pair.quote}`, leg.from)
+    }
+    add(quote)
+    add(hoveredZone)
+    if (alertArcId) m.set(alertArcId, alertArcId.split('-')[0])
+    if (mapLayer === 'signal') {
+      for (const p of snapshot?.pairs ?? []) {
+        const view = signalFrom(p, base)
+        if (view && view.action !== 'hold') m.set(`${p.base}-${p.quote}`, base)
+      }
+    }
+    return m
+  }, [snapshot, base, quote, hoveredZone, mapLayer, alertArcId])
+  const visibleKey = [...arcFrom.keys()].sort().join('|')
 
   // Keep latest live data & helpers in a ref so arc/ring accessors read fresh values
   // without forcing Three.js to recreate meshes or reset animation clocks on each timeframe tick
@@ -188,6 +242,11 @@ export default function FxGlobe() {
     colors,
     levelColor,
     signalColor,
+    base,
+    arcFrom,
+    fromSignalColor,
+    alertZones,
+    alertArcId,
   })
   liveRef.current = {
     snapshot,
@@ -196,6 +255,11 @@ export default function FxGlobe() {
     colors,
     levelColor,
     signalColor,
+    base,
+    arcFrom,
+    fromSignalColor,
+    alertZones,
+    alertArcId,
   }
 
   // Only rebuild arc objects when the set of currency pairs actually changes
@@ -227,6 +291,12 @@ export default function FxGlobe() {
     })
   }, [pairSignature])
 
+  // Same arc objects as above (so lines don't restart their animation), only the ones worth showing
+  const visibleArcs = useMemo(
+    () => arcs.filter((a) => visibleKey.split('|').includes(a.id)),
+    [arcs, visibleKey],
+  )
+
   const getPairForArc = useCallback((arc: StableArc) => {
     return liveRef.current.snapshot?.pairs.find((p) => p.base === arc.base && p.quote === arc.quote)
   }, [])
@@ -252,21 +322,22 @@ export default function FxGlobe() {
   // Stabilized by active keys so ringRepeatPeriod runs on its own clock across ticks
   const activeRingKeys = useMemo(() => {
     if (reducedMotion) return ''
+    const picked = [...alertZones].filter((c) => ZONE_BY_CODE.has(c)).map((c) => `zone:${c}`)
+    if (picked.length) return picked.sort().join('|')
     if (mapLayer === 'volatility') {
       return ZONES.filter((z) => zoneLevels.get(z.code) === 'extreme')
         .map((z) => `zone:${z.code}`)
         .sort()
         .join('|')
     }
+    // Buy / Sell: one ring on each country your currency has an active buy/sell call on
     return (snapshot?.pairs ?? [])
-      .filter((p) => {
-        const action = actionFor(p)
-        return (action === 'buy' || action === 'sell') && ZONE_BY_CODE.has(p.base) && ZONE_BY_CODE.has(p.quote)
-      })
-      .map((p) => `pair:${p.base}-${p.quote}`)
+      .map((p) => signalFrom(p, base))
+      .filter((v) => v && v.action !== 'hold' && ZONE_BY_CODE.has(v.other))
+      .map((v) => `zone:${v!.other}`)
       .sort()
       .join('|')
-  }, [reducedMotion, mapLayer, zoneLevels, snapshot?.pairs])
+  }, [reducedMotion, mapLayer, zoneLevels, snapshot?.pairs, base, alertZones])
 
   const rings = useMemo<StableRing[]>(() => {
     if (!activeRingKeys) return []
@@ -291,8 +362,10 @@ export default function FxGlobe() {
   const ringColor = useCallback((obj: object) => {
     const ring = obj as StableRing
     return (t: number) => {
-      const { colors: c, snapshot: snap, signalColor: sigColor } = liveRef.current
+      const { colors: c, snapshot: snap, signalColor: sigColor, mapLayer: layer, base: from, fromSignalColor: fromColor } = liveRef.current
       let baseColor = c.extreme
+      const picked = liveRef.current.alertZones
+      if (ring.zoneCode && layer === 'signal' && !picked.has(ring.zoneCode)) baseColor = fromColor(findPair(snap, from, ring.zoneCode), from)
       if (ring.pairId) {
         const [b, q] = ring.pairId.split('-')
         const pair = snap?.pairs.find((p) => p.base === b && p.quote === q)
@@ -305,29 +378,36 @@ export default function FxGlobe() {
   const arcColor = useCallback(
     (obj: object) => {
       const pair = getPairForArc(obj as StableArc)
-      const { mapLayer: layer, tolerance: tol, signalColor: sigColor, levelColor: lvlColor, colors: c } = liveRef.current
+      const { mapLayer: layer, tolerance: tol, levelColor: lvlColor, colors: c, arcFrom: legFrom, fromSignalColor: fromColor, alertArcId: picked } = liveRef.current
       if (!pair) return c.nodata
-      return layer === 'signal' ? sigColor(pair) : lvlColor(levelFor(pair, tol))
+      if ((obj as StableArc).id === picked) return c.extreme
+      const from = legFrom.get((obj as StableArc).id)
+      return layer === 'signal' ? (from ? fromColor(pair, from) : c.nodata) : lvlColor(levelFor(pair, tol))
     },
     [getPairForArc],
   )
 
   const arcStroke = useCallback(
     (obj: object) => {
-      const pair = getPairForArc(obj as StableArc)
-      const action = actionFor(pair)
-      const isSignalActive = liveRef.current.mapLayer === 'signal' && (action === 'buy' || action === 'sell')
-      return isSignalActive ? 0.9 : 0.5
+      // Your own route is drawn bolder than the rest
+      const arc = obj as StableArc
+      const { base: from, snapshot: snap, alertArcId: picked } = liveRef.current
+      if (arc.id === picked) return 1.4
+      const onRoute =
+        arc.base === from ||
+        arc.quote === from ||
+        routeLegs(snap, from, useAppStore.getState().quote).some((l) => l.pair.base === arc.base && l.pair.quote === arc.quote)
+      return onRoute ? 0.9 : 0.5
     },
-    [getPairForArc],
+    [],
   )
 
   const arcLabel = useCallback(
     (obj: object) => {
       const pair = getPairForArc(obj as StableArc)
       if (!pair) return ''
-      const { mapLayer: layer, tolerance: tol } = liveRef.current
-      return arcTooltip(pair, layer, levelFor(pair, tol))
+      const { mapLayer: layer, tolerance: tol, arcFrom: legFrom, base: from } = liveRef.current
+      return arcTooltip(pair, layer, levelFor(pair, tol), legFrom.get((obj as StableArc).id) ?? from)
     },
     [getPairForArc],
   )
@@ -403,10 +483,11 @@ export default function FxGlobe() {
   }, [clearSelection])
 
   // 4. Polygon styling (accessors re-run when hover / selection / "To" currency change)
+  const isPicked = useCallback((code: string) => alertZones.has(ZONE_BY_COUNTRY.get(code)?.code ?? ''), [alertZones])
   const isActive = useCallback(
     (code: string) =>
-      code === hoveredCode || code === selectedCode || ZONE_BY_COUNTRY.get(code)?.code === quote,
-    [hoveredCode, selectedCode, quote],
+      code === hoveredCode || code === selectedCode || ZONE_BY_COUNTRY.get(code)?.code === quote || isPicked(code),
+    [hoveredCode, selectedCode, quote, isPicked],
   )
 
   const capColor = useCallback(
@@ -432,19 +513,20 @@ export default function FxGlobe() {
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
       if (code === selectedCode) return colors.ink
+      if (isPicked(code)) return colors.extreme
       return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.ink, 0.45) : withAlpha(colors.ink, 0.12)
     },
-    [colors, selectedCode],
+    [colors, selectedCode, isPicked],
   )
 
   const altitude = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
-      if (code === selectedCode) return 0.04
+      if (code === selectedCode || isPicked(code)) return 0.04
       if (isActive(code)) return 0.03
       return ZONE_BY_COUNTRY.has(code) ? 0.018 : 0.006
     },
-    [selectedCode, isActive],
+    [selectedCode, isActive, isPicked],
   )
 
   const tooltipFor = useCallback(
@@ -498,11 +580,12 @@ export default function FxGlobe() {
   }, [])
 
   return (
-    <div className="absolute inset-0" aria-label="Interactive globe of FX forecast zones">
+    // Starts below the top bar, so the globe is centred in the space you can actually see
+    <div className="absolute inset-x-0 top-12 bottom-0" aria-label="Interactive globe of FX forecast zones">
       <Globe
         ref={globeRef}
         width={width}
-        height={height}
+        height={Math.max(0, height - GLOBE_TOP_OFFSET)}
         onGlobeReady={handleGlobeReady}
         // Textures (local copies in public/assets)
         globeImageUrl="/assets/earth-dark.jpg"
@@ -531,7 +614,7 @@ export default function FxGlobe() {
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
         // Lines joining the two countries of each pair (independent continuous dash clock)
-        arcsData={arcs}
+        arcsData={visibleArcs}
         arcColor={arcColor}
         arcStroke={arcStroke}
         arcAltitudeAutoScale={0.35}

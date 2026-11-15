@@ -28,7 +28,7 @@
   --color-buy: #22c55e;        /* green: model says buy  */
   --color-sell: #ef4444;       /* red:   model says sell */
   --color-hold: #94a3b8;       /* grey:  neither         */
-  --color-extreme: #ff2e3b;    /* BRIGHT red + warning triangle: forecast ≥ 1.5× normal */
+  --color-extreme: #ef4444;    /* same red as Sell (one red in the app) + warning triangle + rings: forecast ≥ 1.5× normal */
 
   /* Pro charts: two data series (validated: CVD-safe on the dark panel). Forecast is also dashed. */
   --color-series-forecast: #6b8cf5;
@@ -44,8 +44,8 @@
   /* Extreme warning: a slow red glow pulse */
   --animate-alarm: alarm 1.6s ease-in-out infinite;
   @keyframes alarm {
-    0%, 100% { box-shadow: 0 0 0 0 rgb(255 46 59 / 0.55); }
-    50% { box-shadow: 0 0 0 6px rgb(255 46 59 / 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0.55); }
+    50% { box-shadow: 0 0 0 6px rgb(239 68 68 / 0); }
   }
   /* Tolerance switch: a brief accent flash on whatever just changed */
   --animate-flash: flash 0.9s ease-out;
@@ -56,6 +56,12 @@
   @keyframes ticker {
     from { transform: translateX(0); }
     to { transform: translateX(-50%); }
+  }
+  /* Extreme alert list: same idea as the ticker, but vertical (only when the list doesn't fit) */
+  --animate-ticker-y: ticker-y 30s linear infinite;
+  @keyframes ticker-y {
+    from { transform: translateY(0); }
+    to { transform: translateY(-50%); }
   }
 }
 

@@ -22,7 +22,7 @@ import {
 } from 'recharts'
 import { getHistory, USING_SAMPLE_DATA } from '../../data/api'
 import { decimalsFor } from '../../data/mock'
-import { actionFor, SIGNAL_INFO, signalDetail, signalHeadline } from '../../lib/signal'
+import { actionFor, SIGNAL_DISCLAIMER, SIGNAL_INFO, signalDetail, signalHeadline } from '../../lib/signal'
 import { costBand, costRatioPct, EXTREME_RATIO, LEVEL_INFO, levelFor, volRatio } from '../../lib/storm'
 import {
   bpToMoney,
@@ -383,6 +383,7 @@ export default function ProPanel() {
           <p className="text-ink-muted text-[11px] leading-snug">
             Model signal: <span className={`font-semibold ${SIGNAL_INFO[signalAction].textClass}`}>{signalHeadline(pair)}</span>
             <span className="num"> · {signalDetail(pair)}</span>
+            <span className="text-ink-faint block text-[10px]">{SIGNAL_DISCLAIMER}.</span>
           </p>
         )}
         {statusNote && <p className="rounded-lg bg-white/[0.04] px-2.5 py-1.5 text-[11px] text-ink-muted">{statusNote}</p>}

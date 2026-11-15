@@ -6,6 +6,8 @@
 import { useState, type ChangeEvent } from 'react'
 import { ArrowLeftRight, MapPin } from 'lucide-react'
 import { ZONES } from '../../data/currencies'
+import { SIGNAL_DISCLAIMER, SIGNAL_INFO, signalFrom, signalFromDetail, signalFromMeaning, signalFromTitle } from '../../lib/signal'
+import { findPair } from '../../lib/zones'
 import { useAppStore } from '../../store/useAppStore'
 
 const MAX_AMOUNT = 1_000_000_000
@@ -55,6 +57,40 @@ function CurrencySelect({
   )
 }
 
+/** Buy / Sell layer only: the model's call for YOUR route, in one plain sentence (said from the From currency) */
+function RouteSignal() {
+  const base = useAppStore((s) => s.base)
+  const quote = useAppStore((s) => s.quote)
+  const snapshot = useAppStore((s) => s.snapshot)
+  const pair = findPair(snapshot, base, quote)
+  const view = signalFrom(pair, base)
+
+  let body
+  if (base === quote) body = <p className="text-ink-muted">Pick two different currencies to see a signal.</p>
+  else if (!pair) body = <p className="text-ink-muted">No signal for {base} → {quote}: the model has no direct pair.</p>
+  else if (!view) body = <p className="text-ink-muted">No signal right now: the forecast server isn&rsquo;t running.</p>
+  else {
+    const { Icon, textClass } = SIGNAL_INFO[view.action]
+    body = (
+      <>
+        <p className={`flex items-center gap-1.5 text-[13px] font-semibold ${textClass}`}>
+          <Icon className="size-4 shrink-0" aria-hidden />
+          {signalFromTitle(view)}
+          <span className="text-ink font-normal">· {signalFromMeaning(view)}</span>
+        </p>
+        <p className="num text-ink-muted">{signalFromDetail(view)}</p>
+      </>
+    )
+  }
+  return (
+    <div aria-live="polite" className="space-y-0.5 rounded-lg border border-panel-border bg-white/[0.03] px-2.5 py-2 text-[11px] leading-snug">
+      <p className="text-ink-muted text-[10px] uppercase tracking-wider">Model signal · {base} → {quote}</p>
+      {body}
+      <p className="text-ink-faint text-[10px]">{SIGNAL_DISCLAIMER}</p>
+    </div>
+  )
+}
+
 export default function ConvertCard() {
   const amount = useAppStore((s) => s.amount)
   const base = useAppStore((s) => s.base)
@@ -64,6 +100,7 @@ export default function ConvertCard() {
   const setBase = useAppStore((s) => s.setBase)
   const setQuote = useAppStore((s) => s.setQuote)
   const swap = useAppStore((s) => s.swap)
+  const showSignal = useAppStore((s) => s.mapLayer === 'signal')
 
   // The text box keeps what you type; the store keeps the number
   const [draft, setDraft] = useState(() => formatAmount(amount))
@@ -110,6 +147,8 @@ export default function ConvertCard() {
         </button>
         <CurrencySelect id="to" label="To" value={quote} onChange={setQuote} />
       </div>
+
+      {showSignal && <RouteSignal />}
 
       <p className="text-ink-muted flex items-center gap-1.5 text-[11px]" aria-live="polite">
         <MapPin className="size-3.5 shrink-0" aria-hidden />
