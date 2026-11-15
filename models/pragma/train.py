@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from loader import load_processed
-from models.xgboost_model import MAX_HORIZON
+from models.xgboost_model import MAX_HORIZON, VOL_TENOR
 
 from .config import PRESETS, RUN_DIR, Config, with_current_finetune_settings
 from .data import Bars, apply_mask, fit_tokenizer, make_mask, split_rows
@@ -365,6 +365,15 @@ def finetune(args) -> None:
           f"test RMSE {rmse(rows['test']['y'].to_numpy(), test_pred):.4f}")
     print("saved", save_predictions(rows["test"], test_pred, args.target, args.horizon, name))
 
+    # The fine-tuned model itself, so predictions can be made later (on CPU too).
+    model_path = os.path.join(RUN_DIR, f"{args.target}_h{args.horizon}_{name}.pt")
+    os.makedirs(RUN_DIR, exist_ok=True)
+    torch.save({"config": cfg.to_dict(), "tokenizer": tokenizer.to_dict(),
+                "model": model.state_dict(),
+                "head": {"target": args.target, "horizon": args.horizon,
+                         "y_mean": y_mean, "y_std": y_std}}, model_path)
+    print("saved", model_path, " (use: python -m models.pragma.train predict --model ...)")
+
 
 # ==========================================================================
 # Linear probe on frozen embeddings (the paper's main evaluation)
@@ -411,6 +420,51 @@ def probe(args) -> None:
 
 
 # ==========================================================================
+# Predictions from a fine-tuned model (works on CPU)
+# ==========================================================================
+
+def predict_command(args) -> None:
+    """Predict the target for the latest bar(s) of every instrument in --data."""
+    device = pick_device(args.device)
+    head = torch.load(args.model, map_location="cpu", weights_only=True).get("head")
+    if head is None:
+        raise SystemExit(f"{args.model} is a pre-training checkpoint, not a fine-tuned model; "
+                         "use one written by `finetune` (e.g. runs/pragma/vol_h30_finetune.pt)")
+    model, tokenizer, cfg = load_checkpoint(args.model, device)
+    series, _ = load_processed(args.data)
+    bars = Bars(series, tokenizer)
+
+    parts = []
+    for instrument_id, df in series.items():
+        if head["target"] == "vol" and df.attrs["tenor"] != VOL_TENOR:
+            continue  # the vol model was trained on one tenor per pair
+        n = len(df)
+        keep = n if args.last == 0 else min(args.last, n)
+        parts.append(pd.DataFrame({
+            "instrument_id": instrument_id, "pair": df.attrs["pair"],
+            "tenor": df.attrs["tenor"],
+            "timestamp": df["timestamp"].iloc[n - keep:].to_numpy(),
+            "g": bars.offset[instrument_id] + np.arange(n - keep, n),
+        }))
+    out = pd.concat(parts, ignore_index=True)
+
+    z = run_in_chunks(model, bars, out["g"].to_numpy(), cfg, device, model)
+    out = out.drop(columns="g")
+    out["pred_log_bp"] = z * head["y_std"] + head["y_mean"]
+    out["pred_bp"] = np.exp(out["pred_log_bp"])  # back from the log scale the model predicts
+    out.insert(0, "target", f"{head['target']}_h{head['horizon']}")
+
+    if args.out.endswith(".csv"):
+        out.to_csv(args.out, index=False)
+    else:
+        out.to_parquet(args.out, index=False)
+    with pd.option_context("display.width", 120, "display.max_columns", 10):
+        print(out.tail(10).to_string(index=False))
+    print(f"\n{len(out):,} predictions ({head['target']}, next {head['horizon']} min) "
+          f"-> {args.out}")
+
+
+# ==========================================================================
 # Command line
 # ==========================================================================
 
@@ -448,6 +502,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = commands.add_parser("probe", help="linear model on frozen embeddings")
     common(sub, with_target=True)
     sub.set_defaults(run=probe)
+
+    sub = commands.add_parser("predict", help="predict with a fine-tuned model (CPU is fine)")
+    sub.add_argument("--model", required=True,
+                     help="a fine-tuned model, e.g. runs/pragma/vol_h30_finetune.pt")
+    sub.add_argument("--data", default="data/processed", help="output dir of loader.py")
+    sub.add_argument("--last", type=int, default=1,
+                     help="predict the last N bars of each instrument (0 = every bar)")
+    sub.add_argument("--out", default=os.path.join(RUN_DIR, "predictions.csv"),
+                     help=".csv or .parquet")
+    sub.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    sub.set_defaults(run=predict_command)
 
     for name in ("pretrain", "finetune"):
         commands.choices[name].add_argument(
