@@ -70,13 +70,13 @@ $PY -c "import torch; print('torch', torch.__version__, 'cuda available:', torch
 if [ "$SKIP_PRETRAIN" != "1" ]; then
     echo; echo "=== pretrain ==="
     $PY -m models.pragma.train pretrain --preset "$PRESET" --checkpoint "$CHECKPOINT" \
-        "${PRE_ARGS[@]}"
+        ${PRE_ARGS[@]+"${PRE_ARGS[@]}"}
 fi
 
 for target in $TARGETS; do
     echo; echo "=== $target: fine-tune from the pre-trained model ==="
     $PY -m models.pragma.train finetune --target "$target" --horizon "$HORIZON" \
-        --checkpoint "$CHECKPOINT" "${FT_ARGS[@]}"
+        --checkpoint "$CHECKPOINT" ${FT_ARGS[@]+"${FT_ARGS[@]}"}
 
     echo; echo "=== $target: linear probe on frozen embeddings ==="
     $PY -m models.pragma.train probe --target "$target" --horizon "$HORIZON" \
@@ -84,7 +84,7 @@ for target in $TARGETS; do
 
     echo; echo "=== $target: same model without pre-training ==="
     $PY -m models.pragma.train finetune --target "$target" --horizon "$HORIZON" \
-        --from-scratch --preset "$PRESET" "${FT_ARGS[@]}"
+        --from-scratch --preset "$PRESET" ${FT_ARGS[@]+"${FT_ARGS[@]}"}
 
     echo; echo "=== $target: comparison with XGBoost ==="
     $PY -m models.pragma.compare --target "$target" --horizon "$HORIZON"
