@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from live.server import (HORIZONS, Engine, json_safe, last_busy_bar, parse_as_of, unflatten)
-from models.signal import signal_score
+from models.signal import signal_score, steady_signal
 
 N = 600
 START = pd.Timestamp("2026-11-12T08:00:00Z")  # a Thursday, well away from the rollover window
@@ -134,8 +134,6 @@ def test_signal_comes_from_the_as_of_row(engine):
     late = engine.pair_snapshot("USDJPY", at(590), at(590))["signal"]
     assert (early["action"], mid["action"], late["action"]) == ("sell", "hold", "buy")
     for sig in (early, mid, late):
-        beats = abs(sig["expectedMoveBps"]) > sig["hurdleBps"]
-        assert (sig["action"] != "hold") == beats
         assert sig["horizonMin"] == 10 and 0.0 <= sig["score"] <= 1.0
     assert early["score"] < 0.1192 < mid["score"] < 0.8808 < late["score"]
 
@@ -155,3 +153,15 @@ def test_signal_score_rule():
     assert score[0] == 0.5 and score[1] > 0.88 and score[2] < 0.12
     # a higher threshold (dearer hurdle) turns the weaker calls into HOLD
     assert signal_score(p, np.full(5, 5.0), np.full(5, 1.0), threshold=3.0)[1].tolist() == ["HOLD", "BUY", "SELL", "HOLD", "HOLD"]
+
+
+def test_steady_signal_holds_a_call_until_it_clearly_ends():
+    hurdles = [0.2, 1.2, 0.8, 0.6, 0.4, 0.9, -1.1, -0.7, -0.4, 1.5]
+    got = steady_signal(np.array(hurdles) * 2.0, np.full(len(hurdles), 2.0), exit_at=0.5)
+    assert got.tolist() == ["HOLD", "BUY", "BUY", "BUY", "HOLD", "HOLD", "SELL", "SELL", "HOLD", "BUY"]
+
+
+def test_steady_signal_can_flip_straight_over_and_resets_on_gaps():
+    assert steady_signal(np.array([1.2, -1.2]), np.ones(2)).tolist() == ["BUY", "SELL"]
+    got = steady_signal(np.array([1.2, 0.8, 0.8, np.nan, 0.8]), np.ones(5), reset=[False, False, True, False, False])
+    assert got.tolist() == ["BUY", "BUY", "HOLD", "HOLD", "HOLD"]

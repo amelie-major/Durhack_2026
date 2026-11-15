@@ -42,7 +42,7 @@ import pandas as pd
 
 from loader import add_features, load_processed
 from models.signal import (DIRECTION_FEATURES, build_direction_rows, direction_dataset,
-                           signal_score, train_direction)
+                           signal_score, steady_signal, train_direction)
 from models.xgboost_model import FEATURES, VOL_TENOR, build_dataset, build_features, train
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,6 +57,7 @@ REPLAY_HOURS = 24                    # "the last day of data"
 STALE_SECONDS = 5 * 60               # no bar for this long -> no fresh data
 SIGNAL_HORIZON = 10                  # minutes: the Buy/Sell signal looks this far ahead (models.signal default)
 SIGNAL_THRESHOLD = 1.0               # expected move must beat this many predicted spreads to trade
+SIGNAL_EXIT = 0.5                    # ...and a call stays on until it drops below this many (less flicker)
 MAX_FILL_MIN = 5                     # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{pair}=X?interval=1m&range=5d"
 UA = "Mozilla/5.0 (fx-forecast-server)"
@@ -243,9 +244,11 @@ class Engine:
         rows = build_direction_rows(bars, h)
         rows["pair"] = pd.Categorical(rows["pair"], categories=self.bank["pairs"])
         p_up = d["model"].predict_proba(rows[DIRECTION_FEATURES])[:, 1]
-        expected, action, score = signal_score(p_up, vol[h], spread[h], SIGNAL_THRESHOLD)
+        expected, _, score = signal_score(p_up, vol[h], spread[h], SIGNAL_THRESHOLD)
+        hurdle = SIGNAL_THRESHOLD * spread[h]
+        action = steady_signal(expected, hurdle, SIGNAL_EXIT, reset=bars["is_gap"].to_numpy())
         return {"p_up": p_up, "expected": expected, "action": action, "score": score,
-                "hurdle": SIGNAL_THRESHOLD * spread[h], "horizon": h}
+                "hurdle": hurdle, "horizon": h}
 
     @staticmethod
     def _signal_at(s: dict, i: int, status: str) -> Optional[dict]:
@@ -433,7 +436,10 @@ def make_handler(engine: Engine):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == "/api/health":
-                    self._send(200, {"ok": True, "pairs": engine.bank["pairs"], "horizons": HORIZONS})
+                    d = engine.bank.get("direction") or {}
+                    self._send(200, {"ok": True, "pairs": engine.bank["pairs"], "horizons": HORIZONS,
+                                     "signal": {"horizonMin": d.get("horizon"), "testHitRate": d.get("test_hit_rate"),
+                                                "enter": SIGNAL_THRESHOLD, "exit": SIGNAL_EXIT}})
                 elif url.path == "/api/snapshot":
                     self._send(200, engine.snapshot(q.get("base", "USD"), parse_as_of(q.get("asOf"))))
                 elif url.path == "/api/history":

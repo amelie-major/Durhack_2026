@@ -74,7 +74,7 @@ function SignalLegend() {
       </ul>
       <p className="text-ink-muted border-t border-panel-border pt-2 text-[11px] leading-snug">
         {hasSignal
-          ? 'Buy USD/JPY = buy USD, sell JPY. Fires when the expected move is bigger than the spread. A model output, not advice.'
+          ? 'Buy USD/JPY = buy USD, sell JPY. Starts when the expected move is bigger than the spread and stays on until it falls to half of it. On held-out data the model called the direction right about 53% of the time and roughly broke even after costs: a model output, not advice.'
           : 'No signal right now: it needs the forecast server (python -m live.server).'}
       </p>
     </section>

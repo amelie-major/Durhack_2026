@@ -4,6 +4,7 @@
  * Rule (models/signal.py, computed by the forecast server, never in the browser):
  *   expected move = (2 × P(up) − 1) × forecast vol × √(2/π)
  *   BUY if it is above the forecast spread, SELL if below minus the spread, otherwise HOLD.
+ *   A call then stays on until the expected move drops under half the spread (steady_signal), so it doesn't flicker.
  * BUY EUR/USD means buy EUR and sell USD. It is a model output, not advice.
  */
 import { Minus, TrendingDown, TrendingUp, type LucideIcon } from 'lucide-react'
