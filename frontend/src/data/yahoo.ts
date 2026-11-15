@@ -18,10 +18,32 @@ interface PairSpec {
   spreadBps: number // typical interbank spread (Yahoo has none)
 }
 
+/**
+ * Every pair in data/processed/instruments.csv (tests/test_live_pairs.py checks they match).
+ * spreadBps: the 1M-forward value for the three pairs with forwards, else the median spot spread in the data.
+ */
 export const LIVE_PAIRS: PairSpec[] = [
   { pair: 'EURUSD', base: 'EUR', quote: 'USD', spreadBps: 0.3 },
   { pair: 'USDJPY', base: 'USD', quote: 'JPY', spreadBps: 0.45 },
   { pair: 'USDSGD', base: 'USD', quote: 'SGD', spreadBps: 0.7 },
+  { pair: 'AUDUSD', base: 'AUD', quote: 'USD', spreadBps: 1.28 },
+  { pair: 'EURGBP', base: 'EUR', quote: 'GBP', spreadBps: 0.82 },
+  { pair: 'EURJPY', base: 'EUR', quote: 'JPY', spreadBps: 0.44 },
+  { pair: 'EURSGD', base: 'EUR', quote: 'SGD', spreadBps: 2.3 },
+  { pair: 'GBPJPY', base: 'GBP', quote: 'JPY', spreadBps: 0.74 },
+  { pair: 'GBPUSD', base: 'GBP', quote: 'USD', spreadBps: 0.52 },
+  { pair: 'NZDUSD', base: 'NZD', quote: 'USD', spreadBps: 1.68 },
+  { pair: 'SGDJPY', base: 'SGD', quote: 'JPY', spreadBps: 2.07 },
+  { pair: 'USDCAD', base: 'USD', quote: 'CAD', spreadBps: 0.79 },
+  { pair: 'USDCHF', base: 'USD', quote: 'CHF', spreadBps: 1.0 },
+  { pair: 'USDCNH', base: 'USD', quote: 'CNH', spreadBps: 0.25 },
+  { pair: 'USDHKD', base: 'USD', quote: 'HKD', spreadBps: 0.24 },
+  { pair: 'USDMXN', base: 'USD', quote: 'MXN', spreadBps: 1.86 },
+  { pair: 'USDNOK', base: 'USD', quote: 'NOK', spreadBps: 2.17 },
+  { pair: 'USDPLN', base: 'USD', quote: 'PLN', spreadBps: 2.07 },
+  { pair: 'USDSEK', base: 'USD', quote: 'SEK', spreadBps: 1.91 },
+  { pair: 'USDTRY', base: 'USD', quote: 'TRY', spreadBps: 1.04 },
+  { pair: 'USDZAR', base: 'USD', quote: 'ZAR', spreadBps: 2.62 },
 ]
 
 const WINDOW = 30 // minutes for realised vol

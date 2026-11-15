@@ -226,14 +226,15 @@ def _wanted(meta: FileMeta, product: str) -> bool:
 
 
 def discover(paths: Iterable[str], skipped: Optional[List[Tuple[FileMeta, str]]] = None,
-             product: str = "all") -> Iterator[Source]:
+             product: str = "all", dedupe: bool = True) -> Iterator[Source]:
     """Yield every recognised data file under `paths`, once per (instrument, day).
 
     `product` limits the result to "forward" or "spot" files ("all" keeps both).
 
     The same day can appear more than once, e.g. inside a zip and also
     extracted next to it. The first copy found is used; later copies are
-    appended to `skipped` (if a list is given) as (meta, location).
+    appended to `skipped` (if a list is given) as (meta, location). With
+    `dedupe=False` every copy is yielded and the caller decides.
     """
     if product not in PRODUCTS:
         raise ValueError(f"product must be one of {PRODUCTS}, got {product!r}")
@@ -249,7 +250,7 @@ def discover(paths: Iterable[str], skipped: Optional[List[Tuple[FileMeta, str]]]
                 continue  # not a data file, or filtered out
 
             key = (meta.instrument_id, meta.date)
-            if key in already_seen:
+            if dedupe and key in already_seen:
                 if skipped is not None:
                     skipped.append((meta, location))
                 continue
@@ -372,6 +373,8 @@ def read_day(src, meta: Optional[FileMeta] = None) -> Tuple[pd.DataFrame, dict]:
         src = io.BytesIO(src)
     raw = pd.read_csv(src)
     _fill_spot_columns(raw)
+    # Files from other feeds name themselves in a "feed" column (see fetch_dukascopy.py).
+    feed = str(raw["feed"].iloc[0]) if "feed" in raw.columns and len(raw) else DEFAULT_FEED
 
     missing_cols = [c for c in KEEP_COLS if c not in raw.columns]
     if missing_cols:
@@ -405,6 +408,7 @@ def read_day(src, meta: Optional[FileMeta] = None) -> Tuple[pd.DataFrame, dict]:
         "n_kept": int((~is_bad).sum()),
         "max_mid_err": max_mid_err,
         "max_allin_err": max_allin_err,
+        "feed": feed,
     }
 
     clean = df.loc[~is_bad, KEEP_COLS].reset_index(drop=True)
@@ -421,10 +425,28 @@ BASIS_POINTS = 1e4  # 1 basis point (bp) = 0.01%
 VOL_WINDOWS = (15, 60, 240)
 
 
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
+# Where an instrument's quotes come from. Challenge1 files carry no label.
+DEFAULT_FEED = "challenge1"
+
+# Other feeds quote wider spreads than Challenge1 for the same pair, so their
+# spread is multiplied by a factor to put it on Challenge1's scale. The factor
+# is measured on the pairs both feeds have by `python fetch_dukascopy.py
+# --validate`; see "Combining the two feeds" in DATA_OVERVIEW.md.
+SPREAD_SCALE: Dict[str, float] = {
+    "dukascopy": 0.477,  # per pair: EURUSD 0.47, USDJPY 0.61, USDSGD 0.38
+}
+
+
+def calibrate_spread(raw_spread_bp: pd.Series, feed: str) -> pd.Series:
+    """A feed's quoted spread (bp) on Challenge1's scale. Challenge1 itself is unchanged."""
+    return raw_spread_bp * SPREAD_SCALE.get(feed, 1.0)
+
+
+def add_features(df: pd.DataFrame, feed: str = DEFAULT_FEED) -> pd.DataFrame:
     """Add derived columns to one instrument's bars (sorted, no duplicate times).
 
-    Prices are turned into basis points so instruments are comparable.
+    Prices are turned into basis points so instruments are comparable. `feed`
+    says where the quotes came from; it only affects `spread_bp`.
     """
     df = df.sort_values("timestamp").reset_index(drop=True)
     ts = df["timestamp"]
@@ -449,7 +471,8 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df["ret_across_gap"] = df["is_gap"]  # ret_bp spans missing bars
 
     # --- Spread and forward points (bp of the close) --------------------------
-    df["spread_bp"] = (df["close_ask"] - df["close_bid"]) / close * BASIS_POINTS
+    df["spread_bp_raw"] = (df["close_ask"] - df["close_bid"]) / close * BASIS_POINTS  # as quoted
+    df["spread_bp"] = calibrate_spread(df["spread_bp_raw"], feed)  # on Challenge1's scale
     df["fp_bp"] = df["close_mid_fp"] / close * BASIS_POINTS
     df["dfp_bp"] = df["fp_bp"].diff().fillna(0.0)  # change in forward points
 
@@ -533,7 +556,12 @@ def _print_summary(series: Dict[str, pd.DataFrame], manifest: pd.DataFrame, n_sk
         first_day = df["timestamp"].iloc[0]
         last_day = df["timestamp"].iloc[-1]
         print(f"  {instrument_id:<36} days={df['date'].nunique():>3}  bars={len(df):>8,}  "
-              f"{first_day:%Y-%m-%d} -> {last_day:%Y-%m-%d}")
+              f"{first_day:%Y-%m-%d} -> {last_day:%Y-%m-%d}  {df.attrs.get('feed', DEFAULT_FEED)}")
+
+    n_clash = int((manifest["status"] == "skipped").sum()) if n_files else 0
+    if n_clash:
+        print(f"  {n_clash} files skipped: the same instrument came from two feeds "
+              f"({DEFAULT_FEED} is kept)")
 
     if n_errors:
         for _, failed in manifest[is_error].iterrows():
@@ -554,22 +582,57 @@ def load_all(paths, verbose: bool = True, product: str = "all") -> Tuple[Dict[st
     manifest_rows: List[dict] = []
     days_by_instrument: Dict[str, List[pd.DataFrame]] = {}
     meta_by_instrument: Dict[str, FileMeta] = {}
+    feed_by_instrument: Dict[str, str] = {}
 
-    for src in discover(paths, skipped, product=product):
+    # discover() cannot tell feeds apart (that needs the file's contents), so
+    # repeated days are sorted out here instead.
+    seen = set()  # (instrument, day) already loaded
+    for src in discover(paths, product=product, dedupe=False):
+        instrument_id = src.meta.instrument_id
+        key = (instrument_id, src.meta.date)
+        current = feed_by_instrument.get(instrument_id)
+        if key in seen and current == DEFAULT_FEED:
+            skipped.append((src.meta, src.source))  # Challenge1 already has this day: no need to read it
+            continue
+
         day_df, row = _load_one_file(src)
+        if day_df is None:
+            manifest_rows.append(row)
+            continue
+        feed = row["feed"]
+        if current is None:
+            current = feed_by_instrument[instrument_id] = feed
+
+        if feed != current:
+            # Two feeds have the same instrument. One series must not mix
+            # quotes from both, so Challenge1 wins; otherwise first come, first kept.
+            if feed != DEFAULT_FEED:
+                row.update(status="skipped", error=f"instrument already loaded from {current}")
+                manifest_rows.append(row)
+                continue
+            for earlier in manifest_rows:
+                if earlier["instrument_id"] == instrument_id and earlier["status"] == "ok":
+                    earlier.update(status="skipped", error=f"instrument also in {DEFAULT_FEED}")
+            days_by_instrument[instrument_id] = []
+            feed_by_instrument[instrument_id] = feed
+            seen = {k for k in seen if k[0] != instrument_id}
+        elif key in seen:
+            skipped.append((src.meta, src.source))  # the same day twice from one feed
+            continue
+
+        seen.add(key)
         manifest_rows.append(row)
-        if day_df is not None:
-            instrument_id = src.meta.instrument_id
-            days_by_instrument.setdefault(instrument_id, []).append(day_df)
-            meta_by_instrument[instrument_id] = src.meta
+        days_by_instrument.setdefault(instrument_id, []).append(day_df)
+        meta_by_instrument[instrument_id] = src.meta
 
     series: Dict[str, pd.DataFrame] = {}
     for instrument_id in sorted(days_by_instrument):
         df = pd.concat(days_by_instrument[instrument_id], ignore_index=True)
         df = df.sort_values("timestamp")
         df = df[~df["timestamp"].duplicated(keep="first")]  # days may overlap at midnight
-        df = add_features(df)
+        df = add_features(df, feed=feed_by_instrument[instrument_id])
         df.attrs.update(meta_by_instrument[instrument_id].attrs())
+        df.attrs["feed"] = feed_by_instrument[instrument_id]
         series[instrument_id] = df
 
     manifest = pd.DataFrame(manifest_rows)
@@ -680,6 +743,7 @@ def load_processed(out_dir: str) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]
     for _, info in instruments.iterrows():
         df = pd.read_parquet(os.path.join(out_dir, info["file"]))
         df.attrs.update({key: info[key] for key in _ATTR_KEYS})
+        df.attrs["feed"] = info.get("feed", DEFAULT_FEED)  # folders saved before feeds existed
         df.attrs["notional"] = int(info["notional"])  # read as text; restore the number
         series[info["instrument_id"]] = df
 
