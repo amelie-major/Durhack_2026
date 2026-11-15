@@ -53,6 +53,11 @@ PRESETS = {
         Config(),
         d_model=256, n_heads=4, d_ffn=1024, history_layers=6,
     ),
+    # Bigger again: for an A100, with fewer steps (pass --steps / PRETRAIN_STEPS).
+    "gpu-large": replace(
+        Config(),
+        d_model=384, n_heads=6, d_ffn=1536, history_layers=8,
+    ),
     # Minutes on a laptop CPU. Only proves the pipeline runs end to end.
     "smoke": replace(
         Config(),
