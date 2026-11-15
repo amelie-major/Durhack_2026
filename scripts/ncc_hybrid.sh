@@ -15,9 +15,9 @@
 
 #SBATCH --job-name=hybrid
 #SBATCH -N 1
-#SBATCH -c 8
+#SBATCH -c 4                   # the short QOS rejects more CPUs per job
 #SBATCH --gres=gpu:ampere:1    # embeddings are computed on the GPU
-#SBATCH --mem=48G
+#SBATCH --mem=28G
 #SBATCH -p tpg-gpu-small       # partition: ug- undergrad, tpg- taught PG, res- research
 #SBATCH --qos=short            # QOS: must allow the time limit below
 #SBATCH -t 04:00:00
