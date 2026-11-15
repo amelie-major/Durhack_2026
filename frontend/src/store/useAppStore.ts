@@ -3,7 +3,7 @@
  * Replay: `replay` is set while the app plays back through the last day of data instead of live.
  */
 import { create } from 'zustand'
-import type { CurrencyCode, ReplayRange, Snapshot, Tolerance, ViewMode } from '../types'
+import type { CurrencyCode, MapLayer, ReplayRange, Snapshot, Tolerance, ViewMode } from '../types'
 import { HOME_CURRENCY, ZONES, type CurrencyZone } from '../data/currencies'
 import { USING_LIVE_DATA } from '../data/api'
 
@@ -61,6 +61,9 @@ interface AppState {
   /** Simple (everyday) or Pro (history + detail) view */
   mode: ViewMode
   setMode: (mode: ViewMode) => void
+  /** What the globe colours show: volatility levels or the Buy / Sell signal */
+  mapLayer: MapLayer
+  setMapLayer: (mapLayer: MapLayer) => void
   /** Latest data for asOf, from src/data/api.ts. null while loading. */
   snapshot: Snapshot | null
   setSnapshot: (snapshot: Snapshot) => void
@@ -141,6 +144,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
   setTolerance: (tolerance) => set({ tolerance }),
   mode: 'simple',
   setMode: (mode) => set({ mode }),
+  mapLayer: 'volatility',
+  setMapLayer: (mapLayer) => set({ mapLayer }),
   snapshot: null,
   setSnapshot: (snapshot) => set({ snapshot }),
 

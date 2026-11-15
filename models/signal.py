@@ -120,13 +120,26 @@ def predict_direction(series: Dict[str, pd.DataFrame], horizon: int, n_jobs: int
 # Signals and backtest
 # ==========================================================================
 
+def signal_score(p_up, pred_vol_bp, pred_spread_bp, threshold: float = 1.0):
+    """The Buy / Sell / Hold rule on its own, for arrays or Series (used by the backtest
+    below and by the live server, so both always apply the same formula).
+
+    Returns (expected_move_bp, signal, score): signal is "BUY" / "SELL" / "HOLD"; score is
+    the expected move in trading hurdles squashed into 0..1 (1 = definitely buy, 0 =
+    definitely sell, 0.5 = no view; exactly at the BUY / SELL line it is 0.88 / 0.12).
+    """
+    expected_move_bp = (2 * p_up - 1) * pred_vol_bp * EXPECTED_ABS_FACTOR
+    hurdle = threshold * pred_spread_bp
+    signal = np.select([expected_move_bp > hurdle, expected_move_bp < -hurdle],
+                       ["BUY", "SELL"], default="HOLD")
+    score = 0.5 + 0.5 * np.tanh(expected_move_bp / hurdle)
+    return expected_move_bp, signal, score
+
+
 def make_signals(rows: pd.DataFrame, threshold: float, hold_min: int) -> pd.DataFrame:
     rows = rows.copy()
-    rows["expected_move_bp"] = (2 * rows["p_up"] - 1) * rows["pred_vol_bp"] * EXPECTED_ABS_FACTOR
-    hurdle = threshold * rows["pred_spread_bp"]
-    rows["signal"] = np.select(
-        [rows["expected_move_bp"] > hurdle, rows["expected_move_bp"] < -hurdle],
-        ["BUY", "SELL"], default="HOLD")
+    rows["expected_move_bp"], rows["signal"], score = signal_score(
+        rows["p_up"], rows["pred_vol_bp"], rows["pred_spread_bp"], threshold)
     side = rows["signal"].map({"BUY": 1, "SELL": -1, "HOLD": 0})
     rows["pnl_bp"] = np.where(side != 0, side * rows["fwd_ret_bp"] - rows["actual_spread_bp"], 0.0)
     rows["taken"] = _one_position_at_a_time(rows, side, hold_min)
@@ -136,8 +149,7 @@ def make_signals(rows: pd.DataFrame, threshold: float, hold_min: int) -> pd.Data
     # 0.5 = no view. It is the expected move measured in trading hurdles
     # (threshold x predicted spread), squashed into 0..1 with tanh, so a signal
     # just at the BUY/SELL line scores 0.88 / 0.12, half way there 0.73 / 0.27.
-    hurdles = rows["expected_move_bp"] / hurdle
-    rows["score"] = (0.5 + 0.5 * np.tanh(hurdles)).round(4)
+    rows["score"] = score.round(4)
     rows["action"] = np.where(rows["taken"], side, 0).astype("int8")
     return rows
 

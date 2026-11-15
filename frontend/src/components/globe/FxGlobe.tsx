@@ -10,16 +10,21 @@
  * - Lit zones are coloured by their volatility level vs the "From" currency (Calm / Unsettled / Storm);
  *   the "From" currency's own zone is the accent colour; zones with no usable data are slate.
  * - "Extreme" zones (forecast ≥ 1.5× normal) are bright red with pulsing warning rings.
+ * - A line (arc) joins the two countries of every pair we have data for.
+ * - Map layer toggle: "Volatility" (above) or "Buy / Sell": zones and lines go green (buy), red (sell)
+ *   or grey (hold) from the model's signal, with pulsing rings at both ends while a buy/sell is on.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Globe, { type GlobeMethods } from 'react-globe.gl'
 import { SINGAPORE_MARKER, ZONES, ZONE_BY_COUNTRY, type CurrencyZone } from '../../data/currencies'
 import { countryCode, escapeHtml, type CountryFeature } from '../../lib/geo'
 import { usePrefersReducedMotion, useWindowSize } from '../../lib/hooks'
-import { costBand, costRatioPct, LEVEL_INFO, volRatio } from '../../lib/storm'
+import { slashPair } from '../../lib/pro'
+import { actionFor, signalDetail, signalHeadline } from '../../lib/signal'
+import { costBand, costRatioPct, LEVEL_INFO, levelFor, volRatio } from '../../lib/storm'
 import { cssVar, withAlpha } from '../../lib/theme'
 import { findPair, zoneLevel, type ZoneLevel } from '../../lib/zones'
-import type { Snapshot } from '../../types'
+import type { MapLayer, PairSnapshot, Snapshot } from '../../types'
 import { useAppStore } from '../../store/useAppStore'
 
 const RESUME_SPIN_AFTER_MS = 3000
@@ -30,16 +35,55 @@ const FOCUS_ALTITUDE = 1.9
 
 type SingaporeMarker = typeof SINGAPORE_MARKER
 
+/** A line between the two countries of a pair */
+interface PairArc {
+  pair: PairSnapshot
+  startLat: number
+  startLng: number
+  endLat: number
+  endLng: number
+  color: string
+  /** A buy or sell is on (drawn thicker, with rings at both ends) */
+  active: boolean
+}
+
+interface Ring {
+  lat: number
+  lng: number
+  color: string
+}
+
+const ZONE_BY_CODE = new Map(ZONES.map((z) => [z.code, z]))
+
+function signalLines(pair: PairSnapshot | undefined): string[] {
+  if (!pair) return ['No signal: no direct pair with your "From" currency']
+  const headline = signalHeadline(pair)
+  if (!headline) return ['No signal (forecast server offline)']
+  const detail = signalDetail(pair)
+  return detail ? [headline, detail] : [headline]
+}
+
+function arcTooltip(arc: PairArc, layer: MapLayer, level: ZoneLevel): string {
+  const lines: string[] = []
+  if (layer === 'signal') lines.push(...signalLines(arc.pair))
+  else if (level === 'nodata' || level === 'home') lines.push('No reliable data right now')
+  else lines.push(`${LEVEL_INFO[level].name} · ${LEVEL_INFO[level].volatility.toLowerCase()} (next 30 min)`)
+  const body = lines.map((l) => `<span>${escapeHtml(l)}</span>`).join('')
+  return `<div class="globe-tip"><strong>${escapeHtml(slashPair(arc.pair.pair))}</strong>${body}</div>`
+}
+
 function tooltipHtml(
   name: string,
   zone: CurrencyZone | null,
   level: ZoneLevel | undefined,
   snapshot: Snapshot | null,
   from: string,
+  layer: MapLayer,
 ): string {
   const lines: string[] = []
   if (!zone) lines.push('No forecast for this country')
   else if (level === 'home') lines.push(`${zone.code} · your "From" currency`)
+  else if (layer === 'signal') lines.push(...signalLines(findPair(snapshot, from, zone.code)))
   else if (!level || level === 'nodata') lines.push(`${zone.code} · no reliable data right now`)
   else {
     const info = LEVEL_INFO[level]
@@ -63,6 +107,8 @@ export default function FxGlobe() {
   const base = useAppStore((s) => s.base)
   const snapshot = useAppStore((s) => s.snapshot)
   const tolerance = useAppStore((s) => s.tolerance)
+  const mapLayer = useAppStore((s) => s.mapLayer)
+  const setQuote = useAppStore((s) => s.setQuote)
   const focus = useAppStore((s) => s.focus)
   const selectCountry = useAppStore((s) => s.selectCountry)
   const clearSelection = useAppStore((s) => s.clearSelection)
@@ -90,6 +136,9 @@ export default function FxGlobe() {
       unsettled: cssVar('--color-unsettled', '#fbbf24'),
       storm: cssVar('--color-storm', '#f43f8e'),
       extreme: cssVar('--color-extreme', '#ff2e3b'),
+      buy: cssVar('--color-buy', '#22c55e'),
+      sell: cssVar('--color-sell', '#ef4444'),
+      hold: cssVar('--color-hold', '#94a3b8'),
     }),
     [],
   )
@@ -109,13 +158,49 @@ export default function FxGlobe() {
     [colors],
   )
 
+  /** Buy / Sell layer: green, red or grey from the model's signal; slate when there is no signal */
+  const signalColor = useCallback(
+    (pair: PairSnapshot | undefined) => {
+      const action = actionFor(pair)
+      return action ? colors[action] : colors.nodata
+    },
+    [colors],
+  )
+
   /** Colour for a country code, or null if it isn't in a currency zone */
   const zoneColor = useCallback(
     (code: string) => {
       const zone = ZONE_BY_COUNTRY.get(code)
-      return zone ? levelColor(zoneLevels.get(zone.code)) : null
+      if (!zone) return null
+      if (mapLayer === 'volatility') return levelColor(zoneLevels.get(zone.code))
+      // Buy / Sell: the signal of this zone's pair with the "From" currency (same colour as its line)
+      return zone.code === base ? colors.accent : signalColor(findPair(snapshot, base, zone.code))
     },
-    [levelColor, zoneLevels],
+    [levelColor, zoneLevels, mapLayer, base, colors, signalColor, snapshot],
+  )
+
+  // One line per pair we have data for, between the two currencies' countries
+  const arcs = useMemo<PairArc[]>(
+    () =>
+      (snapshot?.pairs ?? []).flatMap((pair) => {
+        const a = ZONE_BY_CODE.get(pair.base)
+        const b = ZONE_BY_CODE.get(pair.quote)
+        if (!a || !b) return []
+        const action = actionFor(pair)
+        const signalLayer = mapLayer === 'signal'
+        return [
+          {
+            pair,
+            startLat: a.anchor.lat,
+            startLng: a.anchor.lng,
+            endLat: b.anchor.lat,
+            endLng: b.anchor.lng,
+            color: signalLayer ? signalColor(pair) : levelColor(levelFor(pair, tolerance)),
+            active: signalLayer && (action === 'buy' || action === 'sell'),
+          },
+        ]
+      }),
+    [snapshot, mapLayer, tolerance, signalColor, levelColor],
   )
 
   // 1. Load country shapes once (local file, so venue wifi can't break it)
@@ -137,12 +222,38 @@ export default function FxGlobe() {
 
   const singaporeData = useMemo(() => [SINGAPORE_MARKER], [])
 
-  // Pulsing warning rings on every "Extreme" zone (none when "reduce motion" is on)
-  const extremeRings = useMemo(
-    () => (reducedMotion ? [] : ZONES.filter((z) => zoneLevels.get(z.code) === 'extreme').map((z) => z.anchor)),
-    [zoneLevels, reducedMotion],
+  // Pulsing rings (none when "reduce motion" is on):
+  // volatility layer → on every "Extreme" zone; Buy / Sell layer → green/red at both ends of an active line
+  const rings = useMemo<Ring[]>(() => {
+    if (reducedMotion) return []
+    if (mapLayer === 'volatility') {
+      return ZONES.filter((z) => zoneLevels.get(z.code) === 'extreme').map((z) => ({ ...z.anchor, color: colors.extreme }))
+    }
+    return arcs
+      .filter((a) => a.active)
+      .flatMap((a) => [
+        { lat: a.startLat, lng: a.startLng, color: a.color },
+        { lat: a.endLat, lng: a.endLng, color: a.color },
+      ])
+  }, [zoneLevels, reducedMotion, mapLayer, arcs, colors])
+  const ringColor = useCallback((obj: object) => (t: number) => withAlpha((obj as Ring).color, Math.max(0, 1 - t)), [])
+
+  const arcLabel = useCallback(
+    (obj: object) => {
+      const arc = obj as PairArc
+      return arcTooltip(arc, mapLayer, levelFor(arc.pair, tolerance))
+    },
+    [mapLayer, tolerance],
   )
-  const ringColor = useCallback(() => (t: number) => withAlpha(colors.extreme, Math.max(0, 1 - t)), [colors])
+
+  /** Clicking a line points the app at that pair (its currency that isn't the "From" one) */
+  const handleArcClick = useCallback(
+    (obj: object) => {
+      const { pair } = obj as PairArc
+      setQuote(pair.base === base ? pair.quote : pair.quote === base ? pair.base : pair.quote === 'USD' ? pair.base : pair.quote)
+    },
+    [setQuote, base],
+  )
 
   // 2. Spin + pause-on-drag, set up once the globe exists
   useEffect(() => {
@@ -245,9 +356,9 @@ export default function FxGlobe() {
   const tooltipFor = useCallback(
     (name: string, code: string) => {
       const zone = ZONE_BY_COUNTRY.get(code) ?? null
-      return tooltipHtml(name, zone, zone ? zoneLevels.get(zone.code) : undefined, snapshot, base)
+      return tooltipHtml(name, zone, zone ? zoneLevels.get(zone.code) : undefined, snapshot, base, mapLayer)
     },
-    [zoneLevels, snapshot, base],
+    [zoneLevels, snapshot, base, mapLayer],
   )
 
   const polygonLabel = useCallback(
@@ -325,8 +436,19 @@ export default function FxGlobe() {
         pointLabel={(obj: object) => tooltipFor((obj as SingaporeMarker).name, 'SGP')}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
-        // Extreme-volatility warning rings
-        ringsData={extremeRings}
+        // Lines joining the two countries of each pair
+        arcsData={arcs}
+        arcColor="color"
+        arcStroke={(obj: object) => ((obj as PairArc).active ? 0.9 : 0.5)}
+        arcAltitudeAutoScale={0.35}
+        arcDashLength={reducedMotion ? 1 : 0.45}
+        arcDashGap={reducedMotion ? 0 : 0.12}
+        arcDashAnimateTime={(obj: object) => (reducedMotion ? 0 : (obj as PairArc).active ? 1400 : 4200)}
+        arcsTransitionDuration={0}
+        arcLabel={arcLabel}
+        onArcClick={handleArcClick}
+        // Warning rings (extreme volatility) or buy/sell pulses
+        ringsData={rings}
         ringLat="lat"
         ringLng="lng"
         ringColor={ringColor}

@@ -9,6 +9,7 @@
  */
 import { useEffect, useState } from 'react'
 import { ZONES } from '../../data/currencies'
+import { SIGNALS } from '../../lib/signal'
 import { LEVEL_CUTOFFS, LEVEL_INFO, STORM_LEVELS, type ForecastLevel } from '../../lib/storm'
 import { TOLERANCE_PLAN } from '../../lib/pro'
 import { zoneLevel, type ZoneLevel } from '../../lib/zones'
@@ -51,7 +52,41 @@ function LevelWord({ level }: { level: ZoneLevel }) {
   )
 }
 
+/** Key for the Buy / Sell map layer */
+function SignalLegend() {
+  const hasSignal = useAppStore((s) => s.snapshot?.pairs.some((p) => p.signal) ?? false)
+  return (
+    <section aria-label="Buy / Sell key" className="glass w-[320px] space-y-2.5 px-4 py-3 text-xs">
+      <div className="text-ink-muted text-[10px] uppercase tracking-wider">Model signal · next 10 min</div>
+      <ul aria-label="Signals" className="flex flex-col gap-1.5">
+        {SIGNALS.map(({ action, name, meaning, Icon, textClass }) => (
+          <li key={action} className="flex items-center gap-2">
+            <Icon className={`size-4 shrink-0 ${textClass}`} aria-hidden />
+            <span className={`w-16 shrink-0 font-medium ${textClass}`}>{name}</span>
+            <span className="text-ink-muted min-w-0 flex-1">{meaning}</span>
+          </li>
+        ))}
+        <li className="text-ink-muted flex items-center gap-2">
+          <span className="mx-0.5 size-3 shrink-0 rounded-sm bg-accent" aria-hidden />
+          <span className="w-16 shrink-0">From</span>
+          <span>Your own currency</span>
+        </li>
+      </ul>
+      <p className="text-ink-muted border-t border-panel-border pt-2 text-[11px] leading-snug">
+        {hasSignal
+          ? 'Buy USD/JPY = buy USD, sell JPY. Fires when the expected move is bigger than the spread. A model output, not advice.'
+          : 'No signal right now: it needs the forecast server (python -m live.server).'}
+      </p>
+    </section>
+  )
+}
+
 export default function StormLegend() {
+  const mapLayer = useAppStore((s) => s.mapLayer)
+  return mapLayer === 'signal' ? <SignalLegend /> : <VolatilityLegend />
+}
+
+function VolatilityLegend() {
   const tolerance = useAppStore((s) => s.tolerance)
   const snapshot = useAppStore((s) => s.snapshot)
   const base = useAppStore((s) => s.base)

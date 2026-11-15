@@ -41,6 +41,8 @@ import numpy as np
 import pandas as pd
 
 from loader import add_features, load_processed
+from models.signal import (DIRECTION_FEATURES, build_direction_rows, direction_dataset,
+                           signal_score, train_direction)
 from models.xgboost_model import FEATURES, VOL_TENOR, build_dataset, build_features, train
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +55,8 @@ CACHE_SECONDS = 15                   # how often Yahoo is re-fetched at most
 REPLAY_CACHE_SECONDS = 600           # replay re-uses the same bars so the timeline stays put
 REPLAY_HOURS = 24                    # "the last day of data"
 STALE_SECONDS = 5 * 60               # no bar for this long -> no fresh data
+SIGNAL_HORIZON = 10                  # minutes: the Buy/Sell signal looks this far ahead (models.signal default)
+SIGNAL_THRESHOLD = 1.0               # expected move must beat this many predicted spreads to trade
 MAX_FILL_MIN = 5                     # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{pair}=X?interval=1m&range=5d"
 UA = "Mozilla/5.0 (fx-forecast-server)"
@@ -64,8 +68,7 @@ UA = "Mozilla/5.0 (fx-forecast-server)"
 
 def train_bank() -> dict:
     """Vol and spread models for every horizon, plus per-pair constants."""
-    series, _ = load_processed(str(DATA_DIR))
-    series = {k: v for k, v in series.items() if v.attrs["product"] == "FORWARD"}
+    series = forward_series()
     consts = {}
     for df in series.values():
         if df.attrs["tenor"] != VOL_TENOR:
@@ -84,7 +87,25 @@ def train_bank() -> dict:
             models[target][h] = train(tr, va)
             print(f"  {target:<6} h={h:>2}min  {models[target][h].best_iteration + 1:>4} trees"
                   f"  ({time.time() - t0:.0f}s)", flush=True)
-    return {"horizons": HORIZONS, "models": models, "consts": consts, "pairs": sorted(consts)}
+    return {"horizons": HORIZONS, "models": models, "consts": consts, "pairs": sorted(consts),
+            "direction": train_direction_model(series)}
+
+
+def forward_series() -> Dict[str, pd.DataFrame]:
+    series, _ = load_processed(str(DATA_DIR))
+    return {k: v for k, v in series.items() if v.attrs["product"] == "FORWARD"}
+
+
+def train_direction_model(series: Dict[str, pd.DataFrame]) -> dict:
+    """P(price up over the next SIGNAL_HORIZON minutes), for the Buy/Sell signal."""
+    t0 = time.time()
+    tr, va, te = direction_dataset(series, SIGNAL_HORIZON)
+    model = train_direction(tr, va)
+    moved = te["fwd_ret_bp"] != 0
+    hit = float(((model.predict_proba(te[DIRECTION_FEATURES])[:, 1] > 0.5) == te["up"].astype(bool))[moved].mean())
+    print(f"  direction h={SIGNAL_HORIZON}min  {model.best_iteration + 1:>4} trees  "
+          f"test hit rate {hit:.1%}  ({time.time() - t0:.0f}s)", flush=True)
+    return {"model": model, "horizon": SIGNAL_HORIZON, "test_hit_rate": hit}
 
 
 def load_bank(retrain: bool = False) -> dict:
@@ -92,6 +113,10 @@ def load_bank(retrain: bool = False) -> dict:
         bank = pickle.loads(CACHE.read_bytes())
         if bank.get("horizons") == HORIZONS:
             print(f"loaded models from {CACHE}")
+            if bank.get("direction", {}).get("horizon") != SIGNAL_HORIZON:
+                print("training the direction model for the Buy/Sell signal...", flush=True)
+                bank["direction"] = train_direction_model(forward_series())
+                CACHE.write_bytes(pickle.dumps(bank))
             return bank
     print("training XGBoost models (one-off, cached afterwards)...", flush=True)
     bank = train_bank()
@@ -196,16 +221,43 @@ class Engine:
         X = X[FEATURES]
         vol = {h: np.exp(m.predict(X)) for h, m in self.bank["models"]["vol"].items()}
         spread = {h: np.exp(m.predict(X)) for h, m in self.bank["models"]["spread"].items()}
+        signal = self._signal(bars, vol, spread)
         ret2 = bars["ret_bp"].where(~bars["is_gap"], 0.0) ** 2
         past30 = np.sqrt(ret2.rolling(WINDOW, min_periods=WINDOW // 2).sum())  # t-29 … t
         next30 = past30.shift(-WINDOW)                                          # t+1 … t+30
         gap_ahead = bars["is_gap"].astype(float).rolling(WINDOW).sum().shift(-WINDOW) > 0
         out = {"bars": bars, "vol": vol, "spread": spread, "past30": past30,
-               "next30": next30.mask(gap_ahead), "last_price": last_price,
+               "next30": next30.mask(gap_ahead), "last_price": last_price, "signal": signal,
                "hist30": np.sort(vol[30][~np.isnan(vol[30])])}
         with self.lock:
             self.cache[pair] = (time.time(), out)
         return out
+
+    def _signal(self, bars: pd.DataFrame, vol: dict, spread: dict) -> Optional[dict]:
+        """Buy/Sell/Hold on every row: the direction model's P(up) put through
+        models.signal.signal_score with the vol and spread forecasts for the same horizon."""
+        d = self.bank.get("direction")
+        if not d:
+            return None
+        h = d["horizon"]
+        rows = build_direction_rows(bars, h)
+        rows["pair"] = pd.Categorical(rows["pair"], categories=self.bank["pairs"])
+        p_up = d["model"].predict_proba(rows[DIRECTION_FEATURES])[:, 1]
+        expected, action, score = signal_score(p_up, vol[h], spread[h], SIGNAL_THRESHOLD)
+        return {"p_up": p_up, "expected": expected, "action": action, "score": score,
+                "hurdle": SIGNAL_THRESHOLD * spread[h], "horizon": h}
+
+    @staticmethod
+    def _signal_at(s: dict, i: int, status: str) -> Optional[dict]:
+        sig = s.get("signal")
+        if not sig:
+            return None
+        # no trade call on data we wouldn't show a forecast for
+        action = "hold" if status in ("rollover", "stale", "no_data") else str(sig["action"][i]).lower()
+        return {"action": action, "score": round(float(sig["score"][i]), 4),
+                "pUp": round(float(sig["p_up"][i]), 4),
+                "expectedMoveBps": round(float(sig["expected"][i]), 3),
+                "hurdleBps": round(float(sig["hurdle"][i]), 3), "horizonMin": sig["horizon"]}
 
     @staticmethod
     def _pct(sorted_hist: np.ndarray, x: float) -> float:
@@ -246,6 +298,7 @@ class Engine:
         spread_now = spr[0]
         half = mid * spread_now / 2e4
         rv30 = float(s["past30"].iloc[i])
+        status = status_of(bars["timestamp"].iloc[i], now)
         return {
             "pair": pair, "base": c["base"], "quote": c["quote"],
             "bid": mid - half, "ask": mid + half, "mid": mid, "spreadBps": spread_now,
@@ -255,7 +308,8 @@ class Engine:
                          "volHigh": [round(v * 1.3, 3) for v in vol]},
             "percentile": round(self._pct(hist, vol[-1]), 3),
             "volNormal30m": round(float(np.median(hist)), 3) if len(hist) else None,
-            "status": status_of(bars["timestamp"].iloc[i], now),
+            "status": status,
+            "signal": self._signal_at(s, i, status),
         }
 
     def snapshot(self, base: str, as_of: Optional[pd.Timestamp] = None) -> dict:

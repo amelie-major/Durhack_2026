@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from live.server import (HORIZONS, Engine, json_safe, last_busy_bar, parse_as_of, unflatten)
+from models.signal import signal_score
 
 N = 600
 START = pd.Timestamp("2026-11-12T08:00:00Z")  # a Thursday, well away from the rollover window
@@ -23,8 +24,13 @@ def make_scored(n: int = N, start: pd.Timestamp = START) -> dict:
     past30 = pd.Series(2.0 + i / 1000.0)
     next30 = pd.Series(3.0 + i / 1000.0)
     next30.iloc[-30:] = np.nan                                       # runs off the end of the data
+    # P(up) climbs through the day: sell early, hold in the middle, buy late
+    p_up = np.linspace(0.0, 1.0, n)
+    expected, action, score = signal_score(p_up, vol[10], spread[10], 1.0)
+    signal = {"p_up": p_up, "expected": expected, "action": action, "score": score,
+              "hurdle": spread[10], "horizon": 10}
     return {"bars": bars, "vol": vol, "spread": spread, "past30": past30, "next30": next30,
-            "last_price": 999.0, "hist30": np.sort(vol[30])}
+            "last_price": 999.0, "hist30": np.sort(vol[30]), "signal": signal}
 
 
 @pytest.fixture
@@ -120,3 +126,32 @@ def test_parse_as_of():
 def test_json_safe_turns_nan_into_null():
     body = json_safe({"a": float("nan"), "b": [1.0, float("inf")], "c": "x"})
     assert json.loads(json.dumps(body, allow_nan=False)) == {"a": None, "b": [1.0, None], "c": "x"}
+
+
+def test_signal_comes_from_the_as_of_row(engine):
+    early = engine.pair_snapshot("USDJPY", at(10), at(10))["signal"]
+    mid = engine.pair_snapshot("USDJPY", at(300), at(300))["signal"]
+    late = engine.pair_snapshot("USDJPY", at(590), at(590))["signal"]
+    assert (early["action"], mid["action"], late["action"]) == ("sell", "hold", "buy")
+    for sig in (early, mid, late):
+        beats = abs(sig["expectedMoveBps"]) > sig["hurdleBps"]
+        assert (sig["action"] != "hold") == beats
+        assert sig["horizonMin"] == 10 and 0.0 <= sig["score"] <= 1.0
+    assert early["score"] < 0.1192 < mid["score"] < 0.8808 < late["score"]
+
+
+def test_no_signal_on_stale_data(engine):
+    # two hours after the last bar the pair is stale: never a buy or sell
+    sig = engine.pair_snapshot("USDJPY", at(N + 120), at(N + 120))["signal"]
+    assert sig["action"] == "hold"
+
+
+def test_signal_score_rule():
+    p = np.array([0.5, 1.0, 0.0, 0.75, 0.25])
+    expected, signal, score = signal_score(p, np.full(5, 5.0), np.full(5, 1.0), threshold=1.0)
+    factor = np.sqrt(2 / np.pi)
+    assert expected == pytest.approx([0, 5 * factor, -5 * factor, 2.5 * factor, -2.5 * factor])
+    assert signal.tolist() == ["HOLD", "BUY", "SELL", "BUY", "SELL"]
+    assert score[0] == 0.5 and score[1] > 0.88 and score[2] < 0.12
+    # a higher threshold (dearer hurdle) turns the weaker calls into HOLD
+    assert signal_score(p, np.full(5, 5.0), np.full(5, 1.0), threshold=3.0)[1].tolist() == ["HOLD", "BUY", "SELL", "HOLD", "HOLD"]
