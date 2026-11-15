@@ -31,6 +31,7 @@ import json
 import math
 import pickle
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -244,16 +245,30 @@ class Engine:
             with self.scoring:
                 return self._score(pair)
 
-    def warm(self) -> None:
-        """Score every pair once in the background so the first page load / replay is quick."""
+    def refresh_all(self) -> None:
+        """Rescore every pair (MAX_SCORING at a time)."""
+        def one(pair: str) -> None:
+            try:
+                with self.pair_locks[pair], self.scoring:
+                    self._score(pair)
+            except Exception as e:
+                print(f"[refresh] {pair}: {e}", flush=True)
+        with ThreadPoolExecutor(MAX_SCORING) as ex:
+            list(ex.map(one, self.bank["pairs"]))
+
+    def start_refresher(self) -> None:
+        """Keep every pair's forecasts fresh in the background (about every CACHE_SECONDS),
+        so live requests answer from the cache at once instead of rescoring all pairs
+        (which takes longer than the page waits before asking again)."""
         def run():
-            t0 = time.time()
-            for pair in self.bank["pairs"]:
-                try:
-                    self.scored(pair)
-                except Exception as e:
-                    print(f"[warm] {pair}: {e}", flush=True)
-            print(f"all pairs scored ({time.time() - t0:.0f}s)", flush=True)
+            first = True
+            while True:
+                t0 = time.time()
+                self.refresh_all()
+                if first:
+                    print(f"all pairs scored ({time.time() - t0:.0f}s)", flush=True)
+                    first = False
+                time.sleep(max(1.0, CACHE_SECONDS - (time.time() - t0)))
         threading.Thread(target=run, daemon=True).start()
 
     def _score(self, pair: str) -> dict:
@@ -317,9 +332,10 @@ class Engine:
         return float(np.clip(np.searchsorted(sorted_hist, x) / len(sorted_hist), 0.01, 0.99))
 
     def _get(self, pair: str, as_of: Optional[pd.Timestamp]) -> dict:
-        # Replay re-uses whatever bars are cached (replay-range refreshes them when Replay is
-        # pressed), so the timeline stays put and nothing is rescored mid-replay.
-        return self.scored(pair, math.inf if as_of is not None else CACHE_SECONDS)
+        # Answer from the cache, whatever its age: the background refresher keeps it fresh
+        # (live), and replay only looks at bars before its moment, which don't change.
+        # Only a pair that has never been scored is scored here.
+        return self.scored(pair, math.inf)
 
     @staticmethod
     def _row_at(ts: pd.Series, t: pd.Timestamp) -> int:
@@ -518,7 +534,7 @@ def main() -> int:
     p.add_argument("--retrain", action="store_true", help="retrain instead of using the cache")
     args = p.parse_args()
     engine = Engine(load_bank(args.retrain))
-    engine.warm()
+    engine.start_refresher()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(engine))
     print(f"serving XGBoost forecasts on http://localhost:{args.port}/api/snapshot", flush=True)
     server.serve_forever()
