@@ -9,13 +9,22 @@ it with PCA, and adds the components to XGBoost's own features. The test
 predictions go to runs/pragma/ as `<target>_h<H>_hybrid.parquet`, so
 `python -m models.pragma.compare` lists them next to xgboost and pragma.
 
+The fitted model is exported to runs/pragma/hybrid_<target>_h<H>/ (the prefix is
+--name), a self-contained folder that models.pragma.hybrid_predict loads:
+    pragma.pt   copy of the pre-trained checkpoint
+    pca.npz     PCA mean_ and components_ (plain arrays, no pickles)
+    xgb.json    XGBoost model (save_model)
+    meta.json   target, horizon, feature and embedding columns, pair categories, scores
+
 The embeddings only use bars at or before each row's minute, and PCA is fitted
 on training rows only, so nothing leaks from validation or test.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import time
 from typing import Optional, Sequence
 
@@ -39,6 +48,32 @@ def check_same_rows(xgb_rows: pd.DataFrame, pragma_rows: pd.DataFrame, split: st
             and np.allclose(xgb_rows["y"].to_numpy(), pragma_rows["y"].to_numpy()))
     if not same:
         raise ValueError(f"{split}: XGBoost and PRAGMA rows differ; cannot attach embeddings")
+
+
+def export_model(folder: str, checkpoint: str, pca, xgb_model, target: str, horizon: int,
+                 emb_columns: Sequence[str], pairs: Sequence[str], scores: dict) -> str:
+    """Write everything hybrid_predict needs to rebuild the predictions."""
+    os.makedirs(folder, exist_ok=True)
+    shutil.copyfile(checkpoint, os.path.join(folder, "pragma.pt"))
+    np.savez(os.path.join(folder, "pca.npz"),
+             mean=np.asarray(pca.mean_, dtype=np.float64),
+             components=np.asarray(pca.components_, dtype=np.float64))
+    xgb_model.save_model(os.path.join(folder, "xgb.json"))
+    meta = {
+        "target": target,
+        "horizon": horizon,
+        "features": list(FEATURES),
+        "embedding_columns": list(emb_columns),
+        "pair_categories": [str(p) for p in pairs],
+        "pca_explained_variance": float(pca.explained_variance_ratio_.sum()),
+        "best_iteration": int(xgb_model.best_iteration),
+        "checkpoint_source": os.path.abspath(checkpoint),
+        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **scores,
+    }
+    with open(os.path.join(folder, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+    return folder
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -96,10 +131,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("fitting XGBoost on its own features + embeddings ...", flush=True)
     hybrid = train(train_df, val_df, features=FEATURES + emb_columns)
     pred = hybrid.predict(test_df[FEATURES + emb_columns])
-    print(f"hybrid test RMSE {_rmse(test_df['y'], pred):.4f}  R2 {_r2(test_df['y'], pred):.3f}  "
+    test_rmse, test_r2 = _rmse(test_df['y'], pred), _r2(test_df['y'], pred)
+    print(f"hybrid test RMSE {test_rmse:.4f}  R2 {test_r2:.3f}  "
           f"(best round {hybrid.best_iteration})")
     print("saved", save_predictions(pragma_rows["test"], pred, args.target, args.horizon,
                                     args.name))
+    folder = os.path.join(RUN_DIR, f"{args.name}_{args.target}_h{args.horizon}")
+    print("exported model to", export_model(
+        folder, args.checkpoint, pca, hybrid, args.target, args.horizon, emb_columns,
+        train_df["pair"].cat.categories, {"test_rmse": test_rmse, "test_r2": test_r2}))
     return 0
 
 
