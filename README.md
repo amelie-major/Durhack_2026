@@ -43,16 +43,19 @@ Use `--product forward` or `--product spot` (`-p`) to load only one kind. From P
 Challenge1 has three pairs. `fetch_dukascopy.py` downloads 1-minute spot bars with bid and ask for 18 more from Dukascopy's free datafeed (GBP, AUD, NZD, CHF, CAD, CNH, HKD, MXN, ZAR, NOK, SEK, PLN and TRY against USD, plus five crosses) and writes them in the Challenge1 spot format:
 
 ```bash
-python fetch_dukascopy.py                        # all default pairs, same dates as Challenge1
+python fetch_dukascopy.py --workers 16           # all default pairs, same dates as Challenge1
 python fetch_dukascopy.py --pairs GBPUSD USDMXN  # or just some
-python loader.py data/raw/Challenge1.zip data/raw/dukascopy data/processed
 ```
 
-The server is slow and throttles (2 to 10 seconds per file, 124 files per pair), so the full list takes a few hours. `--workers 16` is about six times faster than the default of 4. Downloads are cached in `data/raw/dukascopy/cache/`; if it stops, run it again and it carries on. To skip the download, take `dukascopy.zip` (22 MB) from the shared drive, put it in `data/raw/` and pass it to the loader in place of `data/raw/dukascopy`.
+The server is slow and throttles (2 to 10 seconds per file, 124 files per pair), so the full list takes about 2.5 hours. Downloads are cached in `data/raw/dukascopy/cache/`; if it stops, run it again and it carries on. To skip the download, take `dukascopy.zip` (23 MB) from the shared drive and put it in `data/raw/`.
 
-XGBoost trains on the new pairs for both targets (`python -m models.xgboost_model --target vol`); for volatility it uses a pair's 1M forward, or its spot series when the pair has no forwards. The PRAGMA and signal models still use 1M forwards only, so they ignore the new pairs.
+To use both feeds together, give the loader both:
 
-`python fetch_dukascopy.py --validate` compares the three overlapping pairs with Challenge1. See [DATA_OVERVIEW.md](DATA_OVERVIEW.md#extra-pairs-from-dukascopy) for what matches and what doesn't.
+```bash
+python loader.py data/raw/Challenge1.zip data/raw/dukascopy.zip data/processed
+```
+
+That writes 48 instruments. Each has a `feed` (`challenge1` or `dukascopy`) in `df.attrs`, and Dukascopy's `spread_bp` is rescaled to Challenge1's level (the quoted value is kept in `spread_bp_raw`). XGBoost trains on the combined folder for both targets; the PRAGMA and signal models still use 1M forwards only for volatility and direction, so they ignore the new pairs there. Details and caveats are in [DATA_OVERVIEW.md](DATA_OVERVIEW.md#combining-the-two-feeds).
 
 ## Use it from Python
 
