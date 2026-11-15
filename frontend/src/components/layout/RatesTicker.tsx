@@ -39,12 +39,12 @@ function TickerEntry({ item, copy = false, showSignal }: { item: TickerItem; cop
   // Volatility layer: the weather word. Buy / Sell layer: the model's signal.
   const info = showSignal ? (item.signal ? SIGNAL_INFO[item.signal] : null) : item.level === 'nodata' ? null : LEVEL_INFO[item.level]
   return (
-    <li aria-hidden={copy || undefined} className="flex shrink-0 items-center gap-2 px-5">
+    <li aria-hidden={copy || undefined} className="flex shrink-0 items-center gap-2.5 px-6">
       <span className="text-ink-muted font-medium">{item.pair}</span>
       <span className="num text-ink">{item.mid == null ? '—' : item.mid.toFixed(decimalsFor(item.pair))}</span>
       {info ? (
         <span className={`flex items-center gap-1 ${info.textClass}`}>
-          <info.Icon className="size-3.5" aria-hidden />
+          <info.Icon className="size-4" aria-hidden />
           <span>{info.name}</span>
         </span>
       ) : (
@@ -65,8 +65,9 @@ export default function RatesTicker() {
   const items = useMemo(() => tickerItems(snapshot, tolerance), [snapshot, tolerance])
 
   return (
-    <div className="glass flex h-9 items-center overflow-hidden rounded-full text-xs">
-      <span className="font-display shrink-0 border-r border-panel-border px-4 font-semibold tracking-tight">
+    <div className="glass flex h-11 items-center overflow-hidden rounded-full text-[13px]">
+      <span className="font-display flex shrink-0 items-center gap-2 border-r border-panel-border px-5 text-[15px] font-semibold tracking-tight">
+        <span className="size-2 rounded-full bg-accent shadow-[0_0_10px_2px_var(--color-accent)]" aria-hidden />
         FX Forecast
       </span>
 

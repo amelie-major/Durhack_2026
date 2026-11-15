@@ -1,5 +1,6 @@
 /**
- * Simple view, bottom-right: tolerance switch + storm-scale key.
+ * Simple view, top-right (mirrors the Extreme alert card on the left): tolerance switch + storm-scale key.
+ * Same card style as the alert card: icon + uppercase title, one plain-English line, then the content.
  * - Tolerance (Relaxed / Balanced / Cautious) is the same store value as in the Pro panel.
  * - Each level row says how much of the time it covers for the chosen tolerance
  *   ("busiest 15%" = forecasts in the top 15% of that pair's own history), so switching visibly
@@ -7,7 +8,8 @@
  * - After a switch, one line says which zones changed level (or that none did right now).
  * Weather word + icon + colour on every level (colour-blind safe).
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { Gauge, TrendingUpDown, type LucideIcon } from 'lucide-react'
 import { ZONES } from '../../data/currencies'
 import { SIGNAL_BASIS, SIGNAL_DISCLAIMER, SIGNAL_INFO } from '../../lib/signal'
 import { LEVEL_CUTOFFS, LEVEL_INFO, STORM_LEVELS, type ForecastLevel } from '../../lib/storm'
@@ -52,6 +54,24 @@ function LevelWord({ level }: { level: ZoneLevel }) {
   )
 }
 
+/** Card shell shared by both keys: same look as the Extreme alert card (icon + uppercase title + one line) */
+function KeyCard({ label, Icon, title, subtitle, children }: { label: string; Icon: LucideIcon; title: string; subtitle: ReactNode; children: ReactNode }) {
+  return (
+    <section aria-label={label} className="glass w-[min(300px,calc(100vw-2rem))] space-y-3 p-3.5 text-xs [@media(max-height:720px)]:space-y-2 [@media(max-height:720px)]:p-3">
+      <div className="space-y-0.5">
+        <header className="flex items-center gap-2">
+          <Icon className="text-accent size-4 shrink-0" aria-hidden />
+          <h2 className="font-display text-ink text-[12px] font-semibold uppercase tracking-wider">{title}</h2>
+        </header>
+        <p className="text-ink-muted text-[11px] leading-snug" aria-live="polite">
+          {subtitle}
+        </p>
+      </div>
+      {children}
+    </section>
+  )
+}
+
 /** Key for the Buy / Sell map layer: every colour is read from your "From" currency */
 function SignalLegend() {
   const base = useAppStore((s) => s.base)
@@ -62,10 +82,16 @@ function SignalLegend() {
     { action: 'hold', meaning: 'Move too small to pay the cost' },
   ]
   return (
-    <section aria-label="Buy / Sell key" className="glass w-[320px] space-y-2.5 px-4 py-3 text-xs">
-      <div className="text-ink-muted text-[10px] uppercase tracking-wider">
-        Model signal · next 10 min · seen from <span className="num text-ink">{base}</span>
-      </div>
+    <KeyCard
+      label="Buy / Sell key"
+      Icon={TrendingUpDown}
+      title="Buy / Sell signal"
+      subtitle={
+        <>
+          Model signal for the next 10 min, seen from your <span className="num text-ink">{base}</span>
+        </>
+      }
+    >
       <ul aria-label="Signals" className="flex flex-col gap-1.5">
         {rows.map(({ action, meaning }) => {
           const { name, Icon, textClass } = SIGNAL_INFO[action]
@@ -98,7 +124,7 @@ function SignalLegend() {
           <p className="text-ink-muted">No signal right now: the forecast server isn&rsquo;t running.</p>
         )}
       </div>
-    </section>
+    </KeyCard>
   )
 }
 
@@ -121,13 +147,9 @@ function VolatilityLegend() {
   }, [changes])
 
   return (
-    <section aria-label="Tolerance and volatility scale" className="glass w-[320px] space-y-3 px-4 py-3 text-xs [@media(max-height:720px)]:space-y-2 [@media(max-height:720px)]:py-2.5">
+    <KeyCard label="Tolerance and volatility scale" Icon={Gauge} title="Your tolerance" subtitle={TOLERANCE_PLAN[tolerance].simple}>
       <div className="space-y-1.5">
-        <div className="text-ink-muted text-[10px] uppercase tracking-wider">Your tolerance</div>
-        <ToleranceSwitch onChange={(from, to) => setChanges(zoneChanges(snapshot, base, from, to))} />
-        <p className="text-ink-muted text-[11px] leading-snug [@media(max-height:720px)]:hidden" aria-live="polite">
-          {TOLERANCE_PLAN[tolerance].simple}
-        </p>
+        <ToleranceSwitch size="md" onChange={(from, to) => setChanges(zoneChanges(snapshot, base, from, to))} />
         {changes && (
           <p className="text-ink-muted text-[11px] leading-snug motion-safe:animate-flash rounded-md px-1 -mx-1" aria-live="polite">
             {changes.length === 0 ? (
@@ -147,7 +169,10 @@ function VolatilityLegend() {
         )}
       </div>
 
-      <ul aria-label="Volatility scale" className="flex flex-col gap-1.5 border-t border-panel-border pt-2.5 [@media(max-height:720px)]:gap-1 [@media(max-height:720px)]:pt-2">
+      <div className="text-ink-muted border-t border-panel-border pt-2.5 text-[10px] uppercase tracking-wider [@media(max-height:720px)]:pt-2">
+        Map key · volatility, next 30 min
+      </div>
+      <ul aria-label="Volatility scale" className="-mt-1 flex flex-col gap-1.5 [@media(max-height:720px)]:gap-1">
         {STORM_LEVELS.map(({ level, name, volatility, Icon, textClass }) => (
           <li key={level} className="flex items-center gap-2">
             <Icon className={`size-4 shrink-0 ${textClass}`} aria-hidden />
@@ -173,6 +198,6 @@ function VolatilityLegend() {
           <span>No forecast here</span>
         </li>
       </ul>
-    </section>
+    </KeyCard>
   )
 }

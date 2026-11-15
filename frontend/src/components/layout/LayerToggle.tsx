@@ -22,10 +22,10 @@ export default function LayerToggle() {
   const setMapLayer = useAppStore((s) => s.setMapLayer)
   return (
     <div className="flex items-center gap-1.5">
-      <span id="map-layer-label" className="text-ink-muted text-[10px] uppercase tracking-wider">
+      <span id="map-layer-label" className="text-ink-muted text-[11px] uppercase tracking-wider max-[1400px]:sr-only">
         Map
       </span>
-      <div role="radiogroup" aria-labelledby="map-layer-label" className="flex rounded-full bg-white/[0.06] p-0.5">
+      <div role="radiogroup" aria-labelledby="map-layer-label" className="seg-track">
         {LAYERS.map(({ layer, label, hint, Icon }) => {
           const on = mapLayer === layer
           return (
@@ -36,11 +36,9 @@ export default function LayerToggle() {
               aria-checked={on}
               title={hint}
               onClick={() => setMapLayer(layer)}
-              className={`flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-accent ${
-                on ? 'bg-ink text-space shadow-sm' : 'text-ink-muted hover:text-ink'
-              }`}
+              className="seg-btn seg-ink"
             >
-              <Icon className="size-3.5" aria-hidden />
+              <Icon className="size-4" aria-hidden />
               {label}
             </button>
           )

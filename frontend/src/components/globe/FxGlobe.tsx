@@ -41,8 +41,8 @@ const FLY_MS = 1200
 const SPIN_SPEED = 0.35
 const START_VIEW = { lat: 22, lng: 20, altitude: 2.4 }
 const FOCUS_ALTITUDE = 1.9
-/** px: the globe area starts under the top bar (matches `top-12`) */
-const GLOBE_TOP_OFFSET = 48
+/** px: the globe area starts under the top bar (matches `top-14`) */
+const GLOBE_TOP_OFFSET = 56
 
 /** Stable arc geometry between two currency zones (never recreated on timeframe ticks) */
 interface StableArc {
@@ -581,7 +581,7 @@ export default function FxGlobe() {
 
   return (
     // Starts below the top bar, so the globe is centred in the space you can actually see
-    <div className="absolute inset-x-0 top-12 bottom-0" aria-label="Interactive globe of FX forecast zones">
+    <div className="absolute inset-x-0 top-14 bottom-0" aria-label="Interactive globe of FX forecast zones">
       <Globe
         ref={globeRef}
         width={width}

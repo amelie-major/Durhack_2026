@@ -1,5 +1,5 @@
 /**
- * Compact convert card: amount, From ⇄ To, swap.
+ * Compact convert card: amount, what it comes to in the To currency right now (mid-market), From ⇄ To, swap.
  * Only currencies we have forecasts for are offered (USD, EUR, JPY, SGD).
  * Step 5 adds the rate, "you'd receive" and the forecast underneath.
  */
@@ -7,7 +7,8 @@ import { useState, type ChangeEvent } from 'react'
 import { ArrowLeftRight, MapPin } from 'lucide-react'
 import { ZONES } from '../../data/currencies'
 import { SIGNAL_DISCLAIMER, SIGNAL_INFO, signalFrom, signalFromDetail, signalFromMeaning, signalFromTitle } from '../../lib/signal'
-import { findPair } from '../../lib/zones'
+import { hhmm } from '../../lib/pro'
+import { findPair, routeLegs, routeRate } from '../../lib/zones'
 import { useAppStore } from '../../store/useAppStore'
 
 const MAX_AMOUNT = 1_000_000_000
@@ -53,6 +54,50 @@ function CurrencySelect({
           </option>
         ))}
       </select>
+    </div>
+  )
+}
+
+/** Amount in `currency` with that currency's usual decimals and its code: "1,557,240 JPY" (never an ambiguous "$") */
+function formatIn(value: number, currency: string): string {
+  let digits = 2
+  try {
+    digits = new Intl.NumberFormat('en-GB', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2
+  } catch {
+    // unknown code: keep 2 decimals
+  }
+  return `${value.toLocaleString('en-GB', { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${currency}`
+}
+
+/** "155.72" / "1.1028" / "0.78432": enough digits to be useful at any size */
+function formatRate(rate: number): string {
+  const digits = rate >= 100 ? 2 : rate >= 1 ? 4 : 5
+  return rate.toLocaleString('en-GB', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+}
+
+/** What the amount comes to right now, at the mid-market rate (updates with every data refresh / replay step) */
+function Converted() {
+  const amount = useAppStore((s) => s.amount)
+  const base = useAppStore((s) => s.base)
+  const quote = useAppStore((s) => s.quote)
+  const snapshot = useAppStore((s) => s.snapshot)
+  const rate = routeRate(snapshot, base, quote)
+  const viaUsd = routeLegs(snapshot, base, quote).length === 2
+
+  if (base === quote) return null
+  if (rate == null) {
+    return <p className="text-ink-muted text-[11px]">{snapshot ? `No ${base} → ${quote} rate right now` : 'Loading rates…'}</p>
+  }
+  return (
+    <div aria-live="polite" className="space-y-0.5 rounded-lg bg-white/[0.04] px-2.5 py-2">
+      <p className="text-ink-muted text-[10px] uppercase tracking-wider">You&rsquo;d get about · mid-market</p>
+      <p className="num text-ink truncate text-lg font-medium" title="Mid-market value, before fees and spread">
+        {formatIn(amount * rate, quote)}
+      </p>
+      <p className="num text-ink-muted truncate text-[11px]">
+        1 {base} = {formatRate(rate)} {quote}
+        {viaUsd ? ' via USD' : ''} · {hhmm(snapshot?.lastUpdated ?? snapshot?.asOf)} UTC
+      </p>
     </div>
   )
 }
@@ -147,6 +192,8 @@ export default function ConvertCard() {
         </button>
         <CurrencySelect id="to" label="To" value={quote} onChange={setQuote} />
       </div>
+
+      <Converted />
 
       {showSignal && <RouteSignal />}
 

@@ -74,7 +74,7 @@ export default function App() {
       </header>
 
       {/* Left column: Extreme alerts (top, shrinks / scrolls to fit) above the convert card (bottom) */}
-      <div className="pointer-events-none absolute top-15 bottom-3 left-3 flex flex-col justify-end gap-3 [&>*]:pointer-events-auto">
+      <div className="pointer-events-none absolute top-17 bottom-3 left-3 flex flex-col justify-end gap-3 [&>*]:pointer-events-auto">
         <div className="flex min-h-0 flex-1 flex-col">
           <ExtremeAlert />
         </div>
@@ -85,8 +85,8 @@ export default function App() {
 
       {/* Bottom-centre: replay the last day (kept clear of the Pro panel) */}
       <div
-        className={`pointer-events-none absolute bottom-3 left-[300px] flex justify-center [&>*]:pointer-events-auto ${
-          mode === 'pro' ? 'right-[400px]' : 'right-[344px]'
+        className={`pointer-events-none absolute bottom-3 left-[304px] flex justify-center [&>*]:pointer-events-auto ${
+          mode === 'pro' ? 'right-[400px]' : 'right-[304px]'
         }`}
       >
         <ReplayBar />
@@ -94,12 +94,12 @@ export default function App() {
 
       {mode === 'pro' ? (
         /* Right: Pro panel (history + detail), between the top bar and the bottom edge */
-        <div className="absolute top-15 right-3 bottom-3 flex flex-col">
+        <div className="absolute top-17 right-3 bottom-3 flex flex-col">
           <ProPanel />
         </div>
       ) : (
-        /* Bottom-right: volatility key */
-        <div className="absolute bottom-3 right-3 hidden sm:block">
+        /* Top-right (mirrors the alert card on the left): tolerance + map key */
+        <div className="absolute top-17 right-3 hidden sm:block">
           <StormLegend />
         </div>
       )}
