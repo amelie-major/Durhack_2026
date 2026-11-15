@@ -9,7 +9,7 @@
  * - Saturdays/Sundays are "thin"
  * Default demo moment (see store): USDJPY stormy, EURUSD calm, USDSGD unsettled.
  */
-import type { CurrencyCode, HistoryPoint, PairHistory, PairSnapshot, PairStatus, Snapshot } from '../types'
+import type { CurrencyCode, HistoryPoint, PairHistory, PairSignal, PairSnapshot, PairStatus, Snapshot } from '../types'
 
 export const HORIZONS_MIN = [5, 10, 15, 20, 25, 30]
 
@@ -71,6 +71,7 @@ function percentileAt(spec: PairSpec, t: Date): number {
 function pairAt(spec: PairSpec, t: Date): PairSnapshot {
   const minute = Math.floor(t.getTime() / 60_000)
   const percentile = percentileAt(spec, t)
+  const status = statusFor(spec, t)
 
   // Rate drifts a little (purely cosmetic)
   const drift = Math.sin(minute / 90 + spec.phase) * 0.002 + (noise(spec.pair + 'p', minute) - 0.5) * 0.0004
@@ -101,7 +102,24 @@ function pairAt(spec: PairSpec, t: Date): PairSnapshot {
     percentile: Number(percentile.toFixed(3)),
     // "Normal" = the vol at a median day (percentile 0.5), same formula as above
     volNormal30m: Number((spec.volPerMinBps * (0.6 + 0.5 * 1.4) * Math.sqrt(30)).toFixed(3)),
-    status: statusFor(spec, t),
+    status,
+    signal: mockSignal(spec, minute, vol[1], spreadBps, status),
+  }
+}
+
+/** Made-up Buy/Sell signal with the real rule's shape: a slow wave for P(up), then expected move vs spread */
+function mockSignal(spec: PairSpec, minute: number, vol10: number, spreadBps: number, status: PairStatus): PairSignal {
+  const pUp = 0.5 + 0.3 * Math.sin(minute / 23 + spec.phase * 1.7) + (noise(spec.pair + 's', minute) - 0.5) * 0.06
+  const expectedMoveBps = (2 * pUp - 1) * vol10 * Math.sqrt(2 / Math.PI)
+  const blocked = status === 'rollover' || status === 'stale' || status === 'no_data'
+  const action = blocked ? 'hold' : expectedMoveBps > spreadBps ? 'buy' : expectedMoveBps < -spreadBps ? 'sell' : 'hold'
+  return {
+    action,
+    score: Number((0.5 + 0.5 * Math.tanh(expectedMoveBps / spreadBps)).toFixed(4)),
+    pUp: Number(pUp.toFixed(4)),
+    expectedMoveBps: Number(expectedMoveBps.toFixed(3)),
+    hurdleBps: spreadBps,
+    horizonMin: 10,
   }
 }
 

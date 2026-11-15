@@ -8,7 +8,7 @@
  * - forecast: EWMA (λ = 0.97) per-minute variance × √horizon
  * - percentile: current 30-min vol ranked against the last 5 days of rolling 30-min vols
  */
-import type { CurrencyCode, HistoryPoint, PairHistory, PairSnapshot, PairStatus, Snapshot } from '../types'
+import type { CurrencyCode, HistoryPoint, PairHistory, PairSnapshot, PairStatus, ReplayRange, Snapshot } from '../types'
 import { HORIZONS_MIN } from './mock'
 
 interface PairSpec {
@@ -66,6 +66,17 @@ function getBars(pair: string): Promise<Bars> {
   bars.catch(() => cache.delete(pair)) // retry on the next call after a failure
   return bars
 }
+
+/** Replay: only the bars at or before asOf, priced at the last of them (nothing from the future) */
+function upTo(b: Bars, asOfMs: number | undefined): Bars {
+  if (asOfMs == null) return b
+  let n = b.t.length
+  while (n > 0 && b.t[n - 1] > asOfMs) n--
+  if (!n) throw new Error('no bars at or before the replay time')
+  return { t: b.t.slice(0, n), close: b.close.slice(0, n), lastPrice: b.close[n - 1] }
+}
+
+const toMs = (asOf: string | undefined) => (asOf ? new Date(asOf).getTime() : undefined)
 
 /** 1-minute log returns in bp; ret[i] is the move from bar i to bar i+1 (gaps > 5 min count as 0) */
 function returnsBp(b: Bars): number[] {
@@ -130,8 +141,8 @@ function analyse(b: Bars) {
   return { ret, ev, sorted, median }
 }
 
-async function livePair(spec: PairSpec, now: number): Promise<PairSnapshot> {
-  const b = await getBars(spec.pair)
+async function livePair(spec: PairSpec, now: number, asOfMs?: number): Promise<PairSnapshot> {
+  const b = upTo(await getBars(spec.pair), asOfMs)
   const { ret, ev, sorted, median } = analyse(b)
   const n = ret.length
   const rv30 = realised(ret, n - WINDOW, n)
@@ -163,26 +174,42 @@ async function livePair(spec: PairSpec, now: number): Promise<PairSnapshot> {
   }
 }
 
-export async function liveSnapshot(base: CurrencyCode): Promise<Snapshot> {
-  const now = Date.now()
-  const results = await Promise.allSettled(LIVE_PAIRS.map((s) => livePair(s, now)))
+export async function liveSnapshot(base: CurrencyCode, asOf?: string): Promise<Snapshot> {
+  const asOfMs = toMs(asOf)
+  const now = asOfMs ?? Date.now()
+  const results = await Promise.allSettled(LIVE_PAIRS.map((s) => livePair(s, now, asOfMs)))
   const pairs = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []))
   results.forEach((r) => r.status === 'rejected' && console.warn('[yahoo]', r.reason))
   if (!pairs.length) throw new Error('Yahoo Finance: no pairs could be loaded')
   const lastBars = await Promise.all(
-    LIVE_PAIRS.map((s) => getBars(s.pair).then((b) => b.t[b.t.length - 1], () => 0)),
+    LIVE_PAIRS.map((s) => getBars(s.pair).then((b) => upTo(b, asOfMs)).then((b) => b.t[b.t.length - 1], () => 0)),
   )
   return { asOf: new Date(now).toISOString(), base, lastUpdated: new Date(Math.max(...lastBars)).toISOString(), pairs }
 }
 
-export async function liveHistory(pair: string, hours: number, stepMin = 5): Promise<PairHistory | null> {
+/** Last 24 h of bars that every pair has */
+export async function liveReplayRange(): Promise<ReplayRange> {
+  // Skip a lone straggler bar after a gap (Yahoo adds one closing bar hours after the market shuts)
+  const lastBusy = (b: Bars) => {
+    let i = b.t.length - 1
+    while (i > 0 && b.t[i] - b.t[i - 1] > 5 * 60_000) i--
+    return b.t[i]
+  }
+  const lasts = await Promise.all(LIVE_PAIRS.map((s) => getBars(s.pair).then(lastBusy)))
+  const end = Math.floor(Math.min(...lasts) / 60_000) * 60_000
+  const iso = (ms: number) => new Date(ms).toISOString().replace('.000Z', 'Z')
+  return { start: iso(end - 24 * 3_600_000), end: iso(end), stepMin: 1 }
+}
+
+export async function liveHistory(pair: string, hours: number, asOf?: string, stepMin = 5): Promise<PairHistory | null> {
   const spec = LIVE_PAIRS.find((s) => s.pair === pair)
   if (!spec) return null
-  const b = await getBars(pair)
+  const asOfMs = toMs(asOf)
+  const b = upTo(await getBars(pair), asOfMs)
   const { ret, ev, sorted } = analyse(b)
   const horizon = HORIZONS_MIN[HORIZONS_MIN.length - 1]
   const step = stepMin * 60_000
-  const end = Math.floor(Date.now() / step) * step
+  const end = Math.floor((asOfMs ?? Date.now()) / step) * step
   const steps = Math.floor((hours * 60) / stepMin)
   const lastBar = b.t[b.t.length - 1]
   const points: HistoryPoint[] = []

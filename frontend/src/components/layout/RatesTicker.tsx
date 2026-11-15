@@ -1,23 +1,27 @@
 /**
  * Top bar: small brand on the left, a slowly scrolling "conveyor belt" of rates in the middle,
  * last-updated + "Sample data" on the right.
- * Each rate shows its volatility level (icon + word), never an up/down arrow — we don't forecast direction.
+ * Each rate shows its volatility level (icon + word); in the Buy / Sell map layer it shows the model's signal instead.
  * Hovering pauses the belt; "reduce motion" turns the scrolling off.
  */
 import { useMemo } from 'react'
 import { USING_SAMPLE_DATA } from '../../data/api'
+import LayerToggle from './LayerToggle'
 import ModeToggle from './ModeToggle'
 import NextUpdate from './NextUpdate'
 import { decimalsFor } from '../../data/mock'
+import { actionFor, SIGNAL_INFO } from '../../lib/signal'
 import { LEVEL_INFO, levelFor, worseLevel } from '../../lib/storm'
 import { findPair } from '../../lib/zones'
 import { useAppStore } from '../../store/useAppStore'
-import type { Snapshot, StormLevel, Tolerance } from '../../types'
+import type { SignalAction, Snapshot, StormLevel, Tolerance } from '../../types'
 
 interface TickerItem {
   pair: string // "EUR/USD"
   mid: number | null
   level: StormLevel
+  /** Buy/Sell signal; null for crosses (the model only signals the pairs it has data for) */
+  signal: SignalAction | null
 }
 
 /** The 3 data pairs plus 3 crosses derived through USD */
@@ -31,17 +35,18 @@ function tickerItems(snapshot: Snapshot | null, tolerance: Tolerance): TickerIte
     x != null && y != null ? f(x, y) : null
 
   return [
-    { pair: 'EUR/USD', mid: eurusd?.mid ?? null, level: lvl(eurusd) },
-    { pair: 'USD/JPY', mid: usdjpy?.mid ?? null, level: lvl(usdjpy) },
-    { pair: 'USD/SGD', mid: usdsgd?.mid ?? null, level: lvl(usdsgd) },
-    { pair: 'EUR/JPY', mid: both(eurusd?.mid, usdjpy?.mid), level: worseLevel(lvl(eurusd), lvl(usdjpy)) },
-    { pair: 'EUR/SGD', mid: both(eurusd?.mid, usdsgd?.mid), level: worseLevel(lvl(eurusd), lvl(usdsgd)) },
-    { pair: 'SGD/JPY', mid: both(usdjpy?.mid, usdsgd?.mid, (j, s) => j / s), level: worseLevel(lvl(usdjpy), lvl(usdsgd)) },
+    { pair: 'EUR/USD', mid: eurusd?.mid ?? null, level: lvl(eurusd), signal: actionFor(eurusd) },
+    { pair: 'USD/JPY', mid: usdjpy?.mid ?? null, level: lvl(usdjpy), signal: actionFor(usdjpy) },
+    { pair: 'USD/SGD', mid: usdsgd?.mid ?? null, level: lvl(usdsgd), signal: actionFor(usdsgd) },
+    { pair: 'EUR/JPY', mid: both(eurusd?.mid, usdjpy?.mid), level: worseLevel(lvl(eurusd), lvl(usdjpy)), signal: null },
+    { pair: 'EUR/SGD', mid: both(eurusd?.mid, usdsgd?.mid), level: worseLevel(lvl(eurusd), lvl(usdsgd)), signal: null },
+    { pair: 'SGD/JPY', mid: both(usdjpy?.mid, usdsgd?.mid, (j, s) => j / s), level: worseLevel(lvl(usdjpy), lvl(usdsgd)), signal: null },
   ]
 }
 
-function TickerEntry({ item, copy = false }: { item: TickerItem; copy?: boolean }) {
-  const info = item.level === 'nodata' ? null : LEVEL_INFO[item.level]
+function TickerEntry({ item, copy = false, showSignal }: { item: TickerItem; copy?: boolean; showSignal: boolean }) {
+  // Volatility layer: the weather word. Buy / Sell layer: the model's signal.
+  const info = showSignal ? (item.signal ? SIGNAL_INFO[item.signal] : null) : item.level === 'nodata' ? null : LEVEL_INFO[item.level]
   return (
     <li aria-hidden={copy || undefined} className="flex shrink-0 items-center gap-2 px-5">
       <span className="text-ink-muted font-medium">{item.pair}</span>
@@ -52,7 +57,7 @@ function TickerEntry({ item, copy = false }: { item: TickerItem; copy?: boolean 
           <span>{info.name}</span>
         </span>
       ) : (
-        <span className="text-ink-muted">No data</span>
+        <span className="text-ink-muted">{showSignal ? 'No signal' : 'No data'}</span>
       )}
       <span className="text-ink-faint pl-3" aria-hidden>
         •
@@ -65,6 +70,7 @@ function TickerEntry({ item, copy = false }: { item: TickerItem; copy?: boolean 
 export default function RatesTicker() {
   const snapshot = useAppStore((s) => s.snapshot)
   const tolerance = useAppStore((s) => s.tolerance)
+  const showSignal = useAppStore((s) => s.mapLayer === 'signal')
   const items = useMemo(() => tickerItems(snapshot, tolerance), [snapshot, tolerance])
 
   return (
@@ -80,11 +86,11 @@ export default function RatesTicker() {
       >
         <ul aria-label="Rates" className="flex w-max motion-safe:animate-ticker group-hover:[animation-play-state:paused]">
           {items.map((item) => (
-            <TickerEntry key={item.pair} item={item} />
+            <TickerEntry key={item.pair} item={item} showSignal={showSignal} />
           ))}
           {/* Second copy for a seamless loop; hidden from screen readers */}
           {items.map((item) => (
-            <TickerEntry key={`${item.pair}-copy`} item={item} copy />
+            <TickerEntry key={`${item.pair}-copy`} item={item} copy showSignal={showSignal} />
           ))}
         </ul>
       </div>
@@ -97,7 +103,8 @@ export default function RatesTicker() {
         )}
         <NextUpdate />
       </span>
-      <span className="shrink-0 border-l border-panel-border px-2">
+      <span className="flex shrink-0 items-center gap-1.5 border-l border-panel-border px-2">
+        <LayerToggle />
         <ModeToggle />
       </span>
     </div>

@@ -25,6 +25,9 @@
   --color-unsettled: #fbbf24;  /* amber + cloud      */
   --color-storm: #f43f8e;      /* magenta + lightning */
   --color-nodata: #334155;
+  --color-buy: #22c55e;        /* green: model says buy  */
+  --color-sell: #ef4444;       /* red:   model says sell */
+  --color-hold: #94a3b8;       /* grey:  neither         */
   --color-extreme: #ff2e3b;    /* BRIGHT red + warning triangle: forecast ≥ 1.5× normal */
 
   /* Pro charts: two data series (validated: CVD-safe on the dark panel). Forecast is also dashed. */

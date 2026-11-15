@@ -39,6 +39,24 @@ export interface PairSnapshot {
    */
   volNormal30m?: number
   status: PairStatus // (v2)
+  /** (v4, optional) The model's Buy / Sell / Hold signal. Missing when there is no direction model. */
+  signal?: PairSignal | null
+}
+
+export type SignalAction = 'buy' | 'sell' | 'hold'
+
+/** Buy/Sell signal for a pair (models/signal.py). BUY EURUSD = buy EUR, sell USD. */
+export interface PairSignal {
+  action: SignalAction
+  /** 1 = definitely buy, 0 = definitely sell, 0.5 = no view */
+  score: number
+  /** Model's probability that the rate is higher after `horizonMin` minutes */
+  pUp: number
+  /** Signed expected move in bp (+ = up) */
+  expectedMoveBps: number
+  /** The move it has to beat: threshold × forecast spread, in bp */
+  hurdleBps: number
+  horizonMin: number
 }
 
 export interface Snapshot {
@@ -75,7 +93,16 @@ export interface PairHistory {
   points: HistoryPoint[] // oldest first, last point = asOf
 }
 
+/** Replay: the stretch of past data that can be played back (the last day we have bars for) */
+export interface ReplayRange {
+  start: string // ISO timestamp
+  end: string // ISO timestamp — the newest bar every pair has
+  stepMin: number // smallest step, 1 = one-minute bars
+}
+
 /** UI-side derived types */
 export type StormLevel = 'calm' | 'unsettled' | 'storm' | 'extreme' | 'nodata' // 'extreme' added in v3
 export type Tolerance = 'relaxed' | 'balanced' | 'cautious'
 export type ViewMode = 'simple' | 'pro'
+/** What the globe colours show */
+export type MapLayer = 'volatility' | 'signal'

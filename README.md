@@ -50,6 +50,23 @@ train, val, test = time_split(series["EURUSD_EUR_FORWARD_1M_1000000"])
 pretrain_ids, holdout_ids = split_instruments(series, holdout_pairs=["USDSGD"])
 ```
 
+## Run the website with live forecasts
+
+Two terminals, both started from the repo root:
+
+```bash
+python -m live.server                # XGBoost forecasts on live Yahoo bars, http://localhost:8000
+cd frontend && npm ci && npm run dev # website, http://localhost:5173
+```
+
+The first `live.server` run trains the models from `data/processed` (about 3 minutes) and caches them in
+`data/live_forecast_models.pkl`. Re-run `loader.py` first if `data/processed` is older than the loader:
+the models need its `vol_15` / `vol_60` columns.
+
+**Replay last day** (button at the bottom of the site) plays back the last 24 hours of Yahoo bars. The
+server answers `/api/snapshot` and `/api/history` with `&asOf=<time>` using only bars at or before that
+moment, so every number is what the model said then. Useful when the market is closed.
+
 ## Tests
 
 ```bash

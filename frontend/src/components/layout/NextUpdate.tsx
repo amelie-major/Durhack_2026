@@ -15,6 +15,7 @@ export default function NextUpdate() {
   const live = useAppStore((s) => s.live)
   const nextUpdateAt = useAppStore((s) => s.nextUpdateAt)
   const setLive = useAppStore((s) => s.setLive)
+  const replaying = useAppStore((s) => s.replay !== null)
 
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -28,8 +29,25 @@ export default function NextUpdate() {
   const R = 6
   const C = 2 * Math.PI * R
 
+  // Replay has its own clock and controls (ReplayBar); here we only say that this isn't live
+  if (replaying) {
+    return (
+      <span className="flex items-center gap-2" title="Playing back the last day of data, not live prices">
+        <span className="rounded-full border border-unsettled/60 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-unsettled">
+          Replay
+        </span>
+        <span>
+          Data at <span className="num text-ink">{formatUtc(lastUpdated)}</span>
+        </span>
+      </span>
+    )
+  }
+
   return (
-    <span className="flex items-center gap-2" title="Forecasts refresh every minute, like the 1-minute data they are built on">
+    <span
+      className="flex items-center gap-2"
+      title={`Forecasts refresh every ${Math.round(UPDATE_EVERY_MS / 1000)} s, built on 1-minute data`}
+    >
       <span>
         Updated <span className="num text-ink">{formatUtc(lastUpdated)}</span>
       </span>
