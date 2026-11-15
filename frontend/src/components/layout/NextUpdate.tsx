@@ -85,9 +85,9 @@ export default function NextUpdate() {
         onClick={() => setLive(!live)}
         aria-label={live ? 'Pause live updates' : 'Resume live updates'}
         title={live ? 'Pause live updates' : 'Resume live updates'}
-        className="grid size-5 cursor-pointer place-items-center rounded-full text-ink-muted outline-none transition hover:bg-white/10 hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+        className="icon-btn"
       >
-        {live ? <Pause className="size-3" aria-hidden /> : <Play className="size-3" aria-hidden />}
+        {live ? <Pause className="size-3.5" aria-hidden /> : <Play className="size-3.5" aria-hidden />}
       </button>
     </span>
   )

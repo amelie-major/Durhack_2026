@@ -27,3 +27,36 @@ export function zoneLevel(snapshot: Snapshot | null, zone: CurrencyCode, from: C
   const legB = findPair(snapshot, 'USD', zone)
   return worseLevel(levelFor(legA, tolerance), levelFor(legB, tolerance))
 }
+
+/**
+ * The pairs a From → To conversion goes through, each with the currency you hold on that leg:
+ * the direct pair if the data has one, otherwise the two legs through USD. Empty if not covered.
+ */
+export function routeLegs(
+  snapshot: Snapshot | null,
+  from: CurrencyCode,
+  to: CurrencyCode,
+): { pair: PairSnapshot; from: CurrencyCode }[] {
+  if (from === to) return []
+  const direct = findPair(snapshot, from, to)
+  if (direct) return [{ pair: direct, from }]
+  const legA = findPair(snapshot, from, 'USD')
+  const legB = findPair(snapshot, 'USD', to)
+  return legA && legB ? [{ pair: legA, from }, { pair: legB, from: 'USD' }] : []
+}
+
+/**
+ * Mid-market rate: how many `to` you get for 1 `from` right now (direct pair, or through USD).
+ * null if a leg is missing or has no usable mid.
+ */
+export function routeRate(snapshot: Snapshot | null, from: CurrencyCode, to: CurrencyCode): number | null {
+  if (from === to) return 1
+  const legs = routeLegs(snapshot, from, to)
+  if (!legs.length) return null
+  let rate = 1
+  for (const { pair, from: held } of legs) {
+    if (!(pair.mid > 0)) return null
+    rate *= pair.base === held ? pair.mid : 1 / pair.mid
+  }
+  return rate
+}

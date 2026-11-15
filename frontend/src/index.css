@@ -28,7 +28,7 @@
   --color-buy: #22c55e;        /* green: model says buy  */
   --color-sell: #ef4444;       /* red:   model says sell */
   --color-hold: #94a3b8;       /* grey:  neither         */
-  --color-extreme: #ff2e3b;    /* BRIGHT red + warning triangle: forecast ≥ 1.5× normal */
+  --color-extreme: #ef4444;    /* same red as Sell (one red in the app) + warning triangle + rings: forecast ≥ 1.5× normal */
 
   /* Pro charts: two data series (validated: CVD-safe on the dark panel). Forecast is also dashed. */
   --color-series-forecast: #6b8cf5;
@@ -44,8 +44,14 @@
   /* Extreme warning: a slow red glow pulse */
   --animate-alarm: alarm 1.6s ease-in-out infinite;
   @keyframes alarm {
-    0%, 100% { box-shadow: 0 0 0 0 rgb(255 46 59 / 0.55); }
-    50% { box-shadow: 0 0 0 6px rgb(255 46 59 / 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0.55); }
+    50% { box-shadow: 0 0 0 6px rgb(239 68 68 / 0); }
+  }
+  /* Convert card: the "You'd get" number glows briefly whenever it changes */
+  --animate-value-pop: value-pop 0.6s ease-out;
+  @keyframes value-pop {
+    from { text-shadow: 0 0 16px rgb(180 198 255 / 0.95); transform: translateY(-1px); }
+    to { text-shadow: 0 0 0 rgb(180 198 255 / 0); transform: none; }
   }
   /* Tolerance switch: a brief accent flash on whatever just changed */
   --animate-flash: flash 0.9s ease-out;
@@ -56,6 +62,12 @@
   @keyframes ticker {
     from { transform: translateX(0); }
     to { transform: translateX(-50%); }
+  }
+  /* Extreme alert list: same idea as the ticker, but vertical (only when the list doesn't fit) */
+  --animate-ticker-y: ticker-y 30s linear infinite;
+  @keyframes ticker-y {
+    from { transform: translateY(0); }
+    to { transform: translateY(-50%); }
   }
 }
 
@@ -125,4 +137,100 @@ div.float-tooltip-kap {
   background: rgb(9 13 26 / 0.96);
   border-color: rgb(148 163 184 / 0.28);
   box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);
+}
+
+@layer components {
+/* ------------------------------------------------------------------
+   Segmented controls (top bar Map + Simple/Pro, tolerance switches):
+   glassy track, a glowing gradient pill for the chosen option, a soft lift on hover
+   and a small "pop" when you pick something (motion only if the OS allows it).
+   ------------------------------------------------------------------ */
+.seg-track {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.02));
+  border: 1px solid var(--color-panel-border);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
+}
+.seg-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 9999px;
+  padding: 0.3rem 0.7rem;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--color-ink-muted);
+  cursor: pointer;
+  outline: none;
+  transition: color 0.2s, background 0.2s, box-shadow 0.25s, transform 0.2s;
+}
+.seg-btn.seg-sm {
+  padding: 0.2rem 0.6rem;
+  font-size: 11px;
+}
+.seg-btn:hover {
+  color: var(--color-ink);
+  background: rgb(255 255 255 / 0.07);
+  box-shadow: 0 0 12px -4px rgb(180 198 255 / 0.5);
+}
+.seg-btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+.seg-btn[aria-checked='true'] {
+  color: var(--color-space);
+  background: linear-gradient(180deg, var(--color-accent-bright), var(--color-accent));
+  box-shadow: 0 0 16px -3px var(--color-accent), inset 0 1px 0 rgb(255 255 255 / 0.45);
+}
+/* White variant (the Map switch), so it never looks like a second Simple | Pro */
+.seg-btn.seg-ink[aria-checked='true'] {
+  background: linear-gradient(180deg, #ffffff, #c9d3e8);
+  box-shadow: 0 0 16px -4px rgb(230 235 245 / 0.8), inset 0 1px 0 rgb(255 255 255 / 0.9);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .seg-btn:hover:not([aria-checked='true']) {
+    transform: translateY(-1px);
+  }
+  .seg-btn[aria-checked='true'] {
+    animation: seg-pop 0.35s ease-out;
+  }
+}
+@keyframes seg-pop {
+  0% { transform: scale(0.92); }
+  60% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+/* Small round icon button in the top bar (pause / resume live updates) */
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 9999px;
+  color: var(--color-ink-muted);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02));
+  border: 1px solid var(--color-panel-border);
+  cursor: pointer;
+  outline: none;
+  transition: color 0.2s, box-shadow 0.25s, transform 0.2s, border-color 0.2s;
+}
+.icon-btn:hover {
+  color: var(--color-ink);
+  border-color: rgb(124 156 255 / 0.5);
+  box-shadow: 0 0 14px -3px var(--color-accent);
+}
+.icon-btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .icon-btn:hover {
+    transform: scale(1.08);
+  }
+}
 }

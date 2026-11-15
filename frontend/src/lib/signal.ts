@@ -8,7 +8,7 @@
  * BUY EUR/USD means buy EUR and sell USD. It is a model output, not advice.
  */
 import { Minus, TrendingDown, TrendingUp, type LucideIcon } from 'lucide-react'
-import type { PairSnapshot, SignalAction } from '../types'
+import type { CurrencyCode, PairSnapshot, SignalAction } from '../types'
 import { slashPair } from './pro'
 
 export interface SignalInfo {
@@ -50,4 +50,50 @@ export function signalDetail(pair: PairSnapshot): string | null {
   const s = pair.signal
   if (!s) return null
   return `expected ${signed(s.expectedMoveBps)} bp vs ${s.hurdleBps.toFixed(1)} bp cost, next ${s.horizonMin} min`
+}
+
+/** Short disclaimer shown wherever the signal appears */
+export const SIGNAL_DISCLAIMER = 'Model signal, not financial advice'
+/** One line on what the signal is based on (hit rate from the team's held-out test) */
+export const SIGNAL_BASIS = 'XGBoost forecast on live Yahoo prices · right about 53% of the time on held-out data'
+
+/** The signal seen from one currency: buy or sell `other` with your `from` currency */
+export interface SignalFromView {
+  action: SignalAction
+  from: CurrencyCode
+  other: CurrencyCode
+  /** Expected move of `other` against `from`, bp (+ = other rises) */
+  moveBps: number
+  hurdleBps: number
+  horizonMin: number
+}
+
+/**
+ * Turn a pair's signal around so it reads from `from`.
+ * BUY USD/JPY means USD up vs JPY, so seen from USD the call on JPY is SELL JPY (JPY expected to fall vs USD).
+ * Same model call, just said from your side; null if there's no signal or `from` isn't in the pair.
+ */
+export function signalFrom(pair: PairSnapshot | undefined, from: CurrencyCode): SignalFromView | null {
+  const s = pair?.signal
+  if (!pair || !s || (pair.base !== from && pair.quote !== from)) return null
+  const other = pair.base === from ? pair.quote : pair.base
+  const flip = other === pair.quote
+  const action: SignalAction = !flip || s.action === 'hold' ? s.action : s.action === 'buy' ? 'sell' : 'buy'
+  return { action, from, other, moveBps: flip ? -s.expectedMoveBps : s.expectedMoveBps, hurdleBps: s.hurdleBps, horizonMin: s.horizonMin }
+}
+
+/** "Buy JPY" / "Sell JPY" / "Hold" */
+export function signalFromTitle(v: SignalFromView): string {
+  return v.action === 'hold' ? 'Hold' : `${SIGNAL_INFO[v.action].name} ${v.other}`
+}
+
+/** "JPY expected to rise vs USD" */
+export function signalFromMeaning(v: SignalFromView): string {
+  if (v.action === 'hold') return 'Expected move smaller than the cost'
+  return `${v.other} expected to ${v.action === 'buy' ? 'rise' : 'fall'} vs ${v.from}`
+}
+
+/** "expected +1.2 bp vs 0.4 bp cost, next 10 min" (move of `other` against `from`) */
+export function signalFromDetail(v: SignalFromView): string {
+  return `expected ${signed(v.moveBps)} bp vs ${v.hurdleBps.toFixed(1)} bp cost, next ${v.horizonMin} min`
 }

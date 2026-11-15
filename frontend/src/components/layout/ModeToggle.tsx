@@ -11,7 +11,7 @@ export default function ModeToggle() {
   const mode = useAppStore((s) => s.mode)
   const setMode = useAppStore((s) => s.setMode)
   return (
-    <div role="radiogroup" aria-label="View" className="flex rounded-full border border-panel-border p-0.5">
+    <div role="radiogroup" aria-label="View" className="seg-track">
       {MODES.map((m) => (
         <button
           key={m.mode}
@@ -20,9 +20,7 @@ export default function ModeToggle() {
           aria-checked={mode === m.mode}
           title={m.hint}
           onClick={() => setMode(m.mode)}
-          className={`cursor-pointer rounded-full px-2.5 py-0.5 text-[11px] font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-accent ${
-            mode === m.mode ? 'bg-accent text-space' : 'text-ink-muted hover:text-ink'
-          }`}
+          className="seg-btn"
         >
           {m.label}
         </button>

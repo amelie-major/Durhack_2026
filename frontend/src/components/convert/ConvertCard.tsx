@@ -1,11 +1,14 @@
 /**
- * Compact convert card: amount, From ⇄ To, swap.
+ * Compact convert card: amount, what it comes to in the To currency right now (mid-market), From ⇄ To, swap.
  * Only currencies we have forecasts for are offered (USD, EUR, JPY, SGD).
  * Step 5 adds the rate, "you'd receive" and the forecast underneath.
  */
 import { useState, type ChangeEvent } from 'react'
 import { ArrowLeftRight, MapPin } from 'lucide-react'
 import { ZONES } from '../../data/currencies'
+import { SIGNAL_DISCLAIMER, SIGNAL_INFO, signalFrom, signalFromDetail, signalFromMeaning, signalFromTitle } from '../../lib/signal'
+import { hhmm } from '../../lib/pro'
+import { findPair, routeLegs, routeRate } from '../../lib/zones'
 import { useAppStore } from '../../store/useAppStore'
 
 const MAX_AMOUNT = 1_000_000_000
@@ -55,6 +58,101 @@ function CurrencySelect({
   )
 }
 
+/** Amount in `currency` with that currency's usual decimals and its code: "1,557,240 JPY" (never an ambiguous "$") */
+function formatIn(value: number, currency: string): string {
+  let digits = 2
+  try {
+    digits = new Intl.NumberFormat('en-GB', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2
+  } catch {
+    // unknown code: keep 2 decimals
+  }
+  return `${value.toLocaleString('en-GB', { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${currency}`
+}
+
+/** "155.72" / "1.1028" / "0.78432": enough digits to be useful at any size */
+function formatRate(rate: number): string {
+  const digits = rate >= 100 ? 2 : rate >= 1 ? 4 : 5
+  return rate.toLocaleString('en-GB', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+}
+
+/** What the amount comes to right now, at the mid-market rate (updates with every data refresh / replay step) */
+function Converted() {
+  const amount = useAppStore((s) => s.amount)
+  const base = useAppStore((s) => s.base)
+  const quote = useAppStore((s) => s.quote)
+  const snapshot = useAppStore((s) => s.snapshot)
+  const rate = routeRate(snapshot, base, quote)
+  const viaUsd = routeLegs(snapshot, base, quote).length === 2
+
+  if (base === quote) return null
+  if (rate == null) {
+    return <p className="text-ink-muted text-[11px]">{snapshot ? `No ${base} → ${quote} rate right now` : 'Loading rates…'}</p>
+  }
+  const value = formatIn(amount * rate, quote)
+  const [number, code] = [value.slice(0, value.lastIndexOf(' ')), quote]
+  return (
+    <div
+      aria-live="polite"
+      className="group relative space-y-0.5 overflow-hidden rounded-xl border border-accent/25 bg-gradient-to-b from-[color-mix(in_oklab,var(--color-accent)_16%,transparent)] to-white/[0.02] px-3 pt-2.5 pb-2 transition duration-200 ease-out hover:border-accent/60 hover:shadow-[0_10px_28px_-10px_var(--color-accent)] motion-safe:hover:-translate-y-0.5"
+    >
+      {/* Glowing top edge, like the Pro tiles */}
+      <span
+        aria-hidden
+        className="absolute inset-x-0 top-0 h-px"
+        style={{ background: 'linear-gradient(90deg, transparent, var(--color-accent-bright), transparent)' }}
+      />
+      <p className="text-ink-muted text-[10px] uppercase tracking-wider">You&rsquo;d get about · mid-market</p>
+      {/* Re-keyed on every new value so it gives a short glow each time the number changes */}
+      <p
+        key={value}
+        className="num text-ink motion-safe:animate-value-pop flex items-baseline gap-1.5 truncate text-2xl font-semibold tracking-tight"
+        title="Mid-market value, before fees and spread"
+      >
+        <span className="truncate">{number}</span>
+        <span className="text-accent-bright text-sm font-semibold">{code}</span>
+      </p>
+      <p className="num text-ink-muted truncate text-[11px]">
+        1 {base} = {formatRate(rate)} {quote}
+        {viaUsd ? ' via USD' : ''} · {hhmm(snapshot?.lastUpdated ?? snapshot?.asOf)} UTC
+      </p>
+    </div>
+  )
+}
+
+/** Buy / Sell layer only: the model's call for YOUR route, in one plain sentence (said from the From currency) */
+function RouteSignal() {
+  const base = useAppStore((s) => s.base)
+  const quote = useAppStore((s) => s.quote)
+  const snapshot = useAppStore((s) => s.snapshot)
+  const pair = findPair(snapshot, base, quote)
+  const view = signalFrom(pair, base)
+
+  let body
+  if (base === quote) body = <p className="text-ink-muted">Pick two different currencies to see a signal.</p>
+  else if (!pair) body = <p className="text-ink-muted">No signal for {base} → {quote}: the model has no direct pair.</p>
+  else if (!view) body = <p className="text-ink-muted">No signal right now: the forecast server isn&rsquo;t running.</p>
+  else {
+    const { Icon, textClass } = SIGNAL_INFO[view.action]
+    body = (
+      <>
+        <p className={`flex items-center gap-1.5 text-[13px] font-semibold ${textClass}`}>
+          <Icon className="size-4 shrink-0" aria-hidden />
+          {signalFromTitle(view)}
+          <span className="text-ink font-normal">· {signalFromMeaning(view)}</span>
+        </p>
+        <p className="num text-ink-muted">{signalFromDetail(view)}</p>
+      </>
+    )
+  }
+  return (
+    <div aria-live="polite" className="space-y-0.5 rounded-lg border border-panel-border bg-white/[0.03] px-2.5 py-2 text-[11px] leading-snug">
+      <p className="text-ink-muted text-[10px] uppercase tracking-wider">Model signal · {base} → {quote}</p>
+      {body}
+      <p className="text-ink-faint text-[10px]">{SIGNAL_DISCLAIMER}</p>
+    </div>
+  )
+}
+
 export default function ConvertCard() {
   const amount = useAppStore((s) => s.amount)
   const base = useAppStore((s) => s.base)
@@ -64,6 +162,7 @@ export default function ConvertCard() {
   const setBase = useAppStore((s) => s.setBase)
   const setQuote = useAppStore((s) => s.setQuote)
   const swap = useAppStore((s) => s.swap)
+  const showSignal = useAppStore((s) => s.mapLayer === 'signal')
 
   // The text box keeps what you type; the store keeps the number
   const [draft, setDraft] = useState(() => formatAmount(amount))
@@ -74,27 +173,36 @@ export default function ConvertCard() {
         <label htmlFor="amount" className="text-ink-muted text-[10px] uppercase tracking-wider">
           Amount
         </label>
-        <input
-          id="amount"
-          inputMode="decimal"
-          autoComplete="off"
-          value={draft}
-          onChange={(e) => {
-            const text = e.target.value
-            if (!ALLOWED_INPUT.test(text)) return // letters, spaces, a 2nd dot… are refused
-            const n = parseAmount(text)
-            if (n > MAX_AMOUNT) {
-              // Over the cap: show the capped number in the box too, so box and conversion always agree
-              setDraft(formatAmount(MAX_AMOUNT))
-              setAmount(MAX_AMOUNT)
-              return
-            }
-            setDraft(text)
-            setAmount(n)
-          }}
-          onBlur={() => setDraft(formatAmount(amount))}
-          className="num h-10 w-full rounded-lg border border-panel-border bg-white/5 px-2.5 text-lg text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        />
+        <div className="group/amount relative">
+          <input
+            id="amount"
+            inputMode="decimal"
+            autoComplete="off"
+            value={draft}
+            onChange={(e) => {
+              const text = e.target.value
+              if (!ALLOWED_INPUT.test(text)) return // letters, spaces, a 2nd dot… are refused
+              const n = parseAmount(text)
+              if (n > MAX_AMOUNT) {
+                // Over the cap: show the capped number in the box too, so box and conversion always agree
+                setDraft(formatAmount(MAX_AMOUNT))
+                setAmount(MAX_AMOUNT)
+                return
+              }
+              setDraft(text)
+              setAmount(n)
+            }}
+            onBlur={() => setDraft(formatAmount(amount))}
+            className="num h-12 w-full rounded-xl border border-panel-border bg-gradient-to-b from-white/[0.09] to-white/[0.02] pr-16 pl-3 text-xl font-medium text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.07)] outline-none transition duration-200 hover:border-accent/40 focus:border-accent/80 focus:shadow-[0_0_0_3px_rgb(124_156_255/0.18),0_0_24px_-6px_var(--color-accent)]"
+          />
+          {/* The currency you're converting from, as a glowing chip inside the box */}
+          <span
+            aria-hidden
+            className="num pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 rounded-md border border-accent/30 bg-accent/15 px-1.5 py-0.5 text-[11px] font-semibold text-accent-bright transition group-focus-within/amount:shadow-[0_0_12px_-2px_var(--color-accent)]"
+          >
+            {base}
+          </span>
+        </div>
       </div>
 
       <div className="flex items-end gap-2">
@@ -110,6 +218,10 @@ export default function ConvertCard() {
         </button>
         <CurrencySelect id="to" label="To" value={quote} onChange={setQuote} />
       </div>
+
+      <Converted />
+
+      {showSignal && <RouteSignal />}
 
       <p className="text-ink-muted flex items-center gap-1.5 text-[11px]" aria-live="polite">
         <MapPin className="size-3.5 shrink-0" aria-hidden />

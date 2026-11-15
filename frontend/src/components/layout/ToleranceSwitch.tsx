@@ -17,7 +17,14 @@ const TOLERANCE_OPTIONS: { value: Tolerance; label: string; Icon: LucideIcon }[]
   { value: 'cautious', label: 'Cautious', Icon: ShieldCheck },
 ]
 
-export default function ToleranceSwitch({ onChange }: { onChange?: (from: Tolerance, to: Tolerance) => void }) {
+export default function ToleranceSwitch({
+  onChange,
+  size = 'sm',
+}: {
+  onChange?: (from: Tolerance, to: Tolerance) => void
+  /** 'md' = roomier version for the Simple-view tolerance card; 'sm' = compact (Pro panel header) */
+  size?: 'sm' | 'md'
+}) {
   const tolerance = useAppStore((s) => s.tolerance)
   const setTolerance = useAppStore((s) => s.setTolerance)
   const buttons = useRef<(HTMLButtonElement | null)[]>([])
@@ -52,7 +59,7 @@ export default function ToleranceSwitch({ onChange }: { onChange?: (from: Tolera
       role="radiogroup"
       aria-label="Your tolerance for volatility"
       onKeyDown={onKeyDown}
-      className="flex rounded-full border border-panel-border bg-white/[0.03] p-0.5"
+      className="seg-track"
     >
       {TOLERANCE_OPTIONS.map(({ value, label, Icon }, i) => {
         const on = value === tolerance
@@ -67,11 +74,9 @@ export default function ToleranceSwitch({ onChange }: { onChange?: (from: Tolera
             aria-checked={on}
             tabIndex={on ? 0 : -1}
             onClick={() => choose(value)}
-            className={`flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-accent ${
-              on ? 'bg-accent text-space shadow-[0_0_12px_-2px_var(--color-accent)]' : 'text-ink-muted hover:bg-white/5 hover:text-ink'
-            }`}
+            className={`seg-btn flex-1 ${size === 'md' ? 'px-2 py-1.5' : 'seg-sm'}`}
           >
-            <Icon className="size-3.5 shrink-0" aria-hidden />
+            <Icon className={`${size === 'md' ? 'size-4' : 'size-3.5'} shrink-0`} aria-hidden />
             {label}
           </button>
         )

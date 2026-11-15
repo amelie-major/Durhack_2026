@@ -82,9 +82,24 @@ interface AppState {
   /** Called by the globe when a country is clicked */
   selectCountry: (country: SelectedCountry, focus: CameraFocus) => void
   clearSelection: () => void
+  /** Pair picked in the Extreme alert list (e.g. "SGDJPY"): drawn bright red on the globe until cleared */
+  alertPair: string | null
+  /**
+   * Show a pair from the Extreme alert list: highlight it and fly the camera to it.
+   * If the pair includes your From currency, its other currency also becomes "To" (your route).
+   * Picking the highlighted pair again clears it.
+   */
+  showAlertPair: (pair: { pair: string; base: CurrencyCode; quote: CurrencyCode }) => void
 }
 
 const zoneOf = (code: CurrencyCode) => ZONES.find((z) => z.code === code)
+
+/** Longitude halfway between two others, the short way round (so Tokyo–Los Angeles goes over the Pacific) */
+function midLng(a: number, b: number): number {
+  let mid = (a + b) / 2
+  if (Math.abs(a - b) > 180) mid += mid > 0 ? -180 : 180
+  return mid
+}
 
 /** Focus the camera on a currency zone chosen from the dropdowns */
 function focusZone(code: CurrencyCode): Pick<AppState, 'selected' | 'focus'> {
@@ -157,7 +172,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
 
   setAmount: (amount) => set({ amount }),
 
+  alertPair: null,
+
   setBase: (code) => {
+    set({ alertPair: null })
     const { quote, base } = get()
     // Picking the "To" currency as "From" swaps them, so the camera follows the new "To" (old From)
     if (code === quote) set({ base: code, quote: base, ...focusZone(base) })
@@ -165,6 +183,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
 
   setQuote: (code) => {
+    set({ alertPair: null })
     const { base, quote } = get()
     if (code === base) set({ quote: code, base: quote, ...focusZone(code) })
     else set({ quote: code, ...focusZone(code) })
@@ -172,16 +191,32 @@ export const useAppStore = create<AppState>()((set, get) => ({
 
   swap: () => {
     const { base, quote } = get()
-    set({ base: quote, quote: base, ...focusZone(base) })
+    set({ base: quote, quote: base, alertPair: null, ...focusZone(base) })
   },
 
   selectCountry: (country, focus) => {
     const { base } = get()
     const zoneCode = country.zone?.code
     // Clicking a lit zone that isn't the "From" currency makes it the "To" currency
-    if (zoneCode && zoneCode !== base) set({ quote: zoneCode, selected: country, focus })
-    else set({ selected: country, focus })
+    if (zoneCode && zoneCode !== base) set({ quote: zoneCode, selected: country, focus, alertPair: null })
+    else set({ selected: country, focus, alertPair: null })
   },
 
-  clearSelection: () => set({ selected: null, focus: null }),
+  clearSelection: () => set({ selected: null, focus: null, alertPair: null }),
+
+  showAlertPair: (p) => {
+    const { base, alertPair, setQuote, clearSelection } = get()
+    if (alertPair === p.pair) return clearSelection() // second click: back to normal
+    if (p.base === base || p.quote === base) {
+      // Your currency is in it: the other one becomes "To" (camera flies there), then highlight
+      setQuote(p.base === base ? p.quote : p.base)
+      set({ alertPair: p.pair })
+      return
+    }
+    // A cross that isn't your route: keep your From/To, just look at it (midway between its two countries)
+    const a = zoneOf(p.base)?.anchor
+    const b = zoneOf(p.quote)?.anchor
+    const focus = a && b ? { lat: (a.lat + b.lat) / 2, lng: midLng(a.lng, b.lng) } : (a ?? b ?? null)
+    set({ alertPair: p.pair, selected: null, focus: focus ? { ...focus } : null })
+  },
 }))
