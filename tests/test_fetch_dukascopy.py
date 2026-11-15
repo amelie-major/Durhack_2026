@@ -75,6 +75,7 @@ def test_written_csv_loads_as_a_spot_instrument(tmp_path):
     assert (manifest["status"] == "ok").all()
     df = series["GBPUSD_GBP_SPOT_SPOT_1000000"]
     assert df.attrs["pair"] == "GBPUSD" and df.attrs["product"] == "SPOT"
+    assert df.attrs["feed"] == "dukascopy"  # the CSV says where it came from
     assert len(df) == 2 and (df["close_mid_fp"] == 0).all()
 
 
@@ -98,3 +99,9 @@ def test_compare_identical_series_agree():
     stats = F.compare(ours.copy(), ours)
     assert stats["n_common"] == 2 and stats["settle_match"] == 1.0
     assert stats["mid_diff_bp"] == 0 and stats["share_of_challenge_bars"] == 1.0
+
+
+def test_spread_scale_is_the_geometric_mean_of_pair_ratios():
+    stats = pd.DataFrame({"spread_bp_challenge": [1.0, 1.0], "spread_bp_dukascopy": [2.0, 8.0]})
+    assert F.spread_scale(stats) == 0.25  # ratios 1/2 and 1/8
+    assert F.spread_scale(pd.DataFrame()) is None

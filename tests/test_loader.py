@@ -288,3 +288,70 @@ def test_product_flag(dataset, tmp_path):
     out = tmp_path / "out"
     assert L.main(["--product", "spot", "-q", str(root), str(out)]) == 0
     assert (out / f"{spot_id}.parquet").exists()
+
+
+# ------------------------------------------------------------------- feeds
+def _write_spot(folder, pair, feed=None, n_days=3, seed=7):
+    """Spot files for one pair; `feed` adds the label that fetch_dukascopy.py writes."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for d in range(n_days):
+        day = pd.Timestamp(START) + pd.Timedelta(days=d)
+        df = make_day(day, 1.30, seed=seed + d)
+        df = df.drop(columns=[c for c in df.columns if c.endswith(("_fp", "_all_in"))])
+        if feed:
+            df["feed"] = feed
+        df.to_csv(folder / f"{pair}_{pair[:3]}_SPOT_SPOT_1000000_{day:%Y%m%d}.csv", index=False)
+
+
+def test_feed_defaults_to_challenge1_and_is_read_from_files(dataset, tmp_path):
+    root, _ = dataset
+    _write_spot(tmp_path / "duka", "GBPCHF", feed="dukascopy")
+    series, manifest = L.load_all([root, tmp_path / "duka"], verbose=False)
+
+    assert series["EURUSD_EUR_FORWARD_1M_1000000"].attrs["feed"] == "challenge1"
+    assert series["GBPCHF_GBP_SPOT_SPOT_1000000"].attrs["feed"] == "dukascopy"
+    assert set(manifest["feed"]) == {"challenge1", "dukascopy"}
+
+
+def test_feed_survives_save_and_load(dataset, tmp_path):
+    root, _ = dataset
+    _write_spot(tmp_path / "duka", "GBPCHF", feed="dukascopy")
+    series, manifest = L.load_all([root, tmp_path / "duka"], verbose=False)
+    L.save_processed(series, manifest, tmp_path / "out")
+    loaded, _ = L.load_processed(tmp_path / "out")
+    assert {k: v.attrs["feed"] for k, v in loaded.items()} == {k: v.attrs["feed"] for k, v in series.items()}
+
+    # a folder written before feeds existed has no "feed" column
+    info = pd.read_csv(tmp_path / "out" / "instruments.csv").drop(columns=["feed"])
+    info.to_csv(tmp_path / "out" / "instruments.csv", index=False)
+    old, _ = L.load_processed(tmp_path / "out")
+    assert all(df.attrs["feed"] == "challenge1" for df in old.values())
+
+
+def test_other_feeds_spread_is_scaled_and_raw_is_kept(tmp_path, monkeypatch):
+    monkeypatch.setitem(L.SPREAD_SCALE, "dukascopy", 0.5)
+    _write_spot(tmp_path / "duka", "GBPCHF", feed="dukascopy")
+    _write_spot(tmp_path / "chal", "GBPUSD")
+    series, _ = L.load_all([tmp_path / "duka", tmp_path / "chal"], verbose=False)
+
+    duka = series["GBPCHF_GBP_SPOT_SPOT_1000000"]
+    quoted = (duka["close_ask"] - duka["close_bid"]) / duka["close_mid"] * 1e4
+    assert np.allclose(duka["spread_bp_raw"], quoted)
+    assert np.allclose(duka["spread_bp"], quoted * 0.5)
+
+    chal = series["GBPUSD_GBP_SPOT_SPOT_1000000"]
+    assert np.allclose(chal["spread_bp"], chal["spread_bp_raw"])  # Challenge1 is never rescaled
+
+
+@pytest.mark.parametrize("challenge_first", [True, False])
+def test_same_instrument_from_two_feeds_keeps_challenge1(tmp_path, challenge_first):
+    _write_spot(tmp_path / "chal", "GBPUSD", seed=1)
+    _write_spot(tmp_path / "duka", "GBPUSD", feed="dukascopy", seed=50, n_days=5)
+    order = ["chal", "duka"] if challenge_first else ["duka", "chal"]
+    series, manifest = L.load_all([tmp_path / name for name in order], verbose=False)
+
+    df = series["GBPUSD_GBP_SPOT_SPOT_1000000"]
+    assert df.attrs["feed"] == "challenge1"
+    assert df["date"].nunique() == 3  # none of the five Dukascopy days leaked in
+    assert (manifest.loc[manifest["feed"] == "dukascopy", "status"] == "skipped").all()
+    assert (manifest.loc[manifest["feed"] == "challenge1", "status"] == "ok").all()

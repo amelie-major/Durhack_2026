@@ -55,7 +55,9 @@ _CANDLE = np.dtype([("sec", ">u4"), ("open", ">u4"), ("close", ">u4"),
 
 _SPOT_T_PLUS_1 = {"USDCAD", "USDTRY"}  # these settle in one business day, the rest in two
 _OHLC = ["open", "high", "low", "close"]
-CSV_COLS = ["timestamp", "settlement_date"] + [f"{p}_{s}" for p in _OHLC for s in ("bid", "ask", "mid")]
+FEED = "dukascopy"  # written into every CSV so loader.py knows where the quotes came from
+CSV_COLS = (["timestamp", "settlement_date"]
+            + [f"{p}_{s}" for p in _OHLC for s in ("bid", "ask", "mid")] + ["feed"])
 
 
 def price_scale(pair: str) -> float:
@@ -169,6 +171,7 @@ def make_bars(bid: pd.DataFrame, ask: pd.DataFrame, pair: str,
         out[f"{part}_bid"] = b
         out[f"{part}_ask"] = a
         out[f"{part}_mid"] = np.round((b + a) / 2, decimals + 1)
+    out["feed"] = FEED
     return out[CSV_COLS]
 
 
@@ -275,22 +278,44 @@ def compare(ours: pd.DataFrame, theirs: pd.DataFrame) -> Dict[str, float]:
     }
 
 
+def spread_scale(stats: pd.DataFrame) -> Optional[float]:
+    """Factor that puts Dukascopy spreads on Challenge1's scale.
+
+    The geometric mean of each overlapping pair's ratio of mean spreads, so
+    every pair counts equally whatever its spread level.
+    """
+    if stats.empty or "spread_bp_dukascopy" not in stats:
+        return None
+    ratio = stats["spread_bp_challenge"] / stats["spread_bp_dukascopy"]
+    return float(np.exp(np.log(ratio).mean()))
+
+
 def validate(challenge: str, days: List[date], cache: Path, pause: float, workers: int) -> None:
     from loader import load_all
 
     series, _ = load_all([challenge], verbose=False, product="spot")
     by_pair = {df.attrs["pair"]: df for df in series.values()}
+    prefetch(VALIDATE_PAIRS, days, cache, pause, workers)
     rows = []
     for pair in VALIDATE_PAIRS:
         if pair not in by_pair:
             print(f"{pair}: no spot series in {challenge}")
             continue
         print(pair, end=" ", flush=True)
-        bid, ask = fetch_sides(pair, days, cache, pause, workers)
+        try:
+            bid, ask = fetch_sides(pair, days, cache, pause, workers)
+        except Throttled as e:
+            print(f"\n  skipped: {e}. Rerun later; finished days are cached.")
+            continue
         for shift in (0, 1):
             ours = make_bars(bid, ask, pair, shift_min=shift)
             rows.append({"pair": pair, "shift_min": shift, **compare(ours, by_pair[pair])})
-    print(pd.DataFrame(rows).round(4).to_string(index=False))
+    table = pd.DataFrame(rows)
+    print(table.round(4).to_string(index=False))
+    scale = spread_scale(table[table["shift_min"] == BAR_SHIFT_MIN])
+    if scale is not None:
+        print(f"\nspread scale (Challenge1 / Dukascopy, geometric mean over pairs): {scale:.3f}")
+        print("  this is loader.SPREAD_SCALE['dukascopy']")
 
 
 # --------------------------------------------------------------------------
