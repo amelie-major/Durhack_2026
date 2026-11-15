@@ -1,7 +1,7 @@
 /**
  * Layout: the globe fills the screen; small panels sit at the edges so it stays visible.
  * Pro mode adds a slim history panel on the right (the globe stays visible on the left/centre).
- * Steps 5–7 add the forecast panel, execution strip and replay controls.
+ * Bottom-centre: replay controls (play back through the last day of data).
  */
 import { useEffect } from 'react'
 import FxGlobe from './components/globe/FxGlobe'
@@ -10,6 +10,7 @@ import RatesTicker from './components/layout/RatesTicker'
 import StormLegend from './components/layout/StormLegend'
 import ProPanel from './components/pro/ProPanel'
 import ExtremeAlert from './components/layout/ExtremeAlert'
+import ReplayBar from './components/layout/ReplayBar'
 import { getSnapshot } from './data/api'
 import { useAppStore } from './store/useAppStore'
 
@@ -17,10 +18,11 @@ import { useAppStore } from './store/useAppStore'
 function useSnapshotLoader() {
   const asOf = useAppStore((s) => s.asOf)
   const base = useAppStore((s) => s.base)
+  const replaying = useAppStore((s) => s.replay !== null)
   const setSnapshot = useAppStore((s) => s.setSnapshot)
   useEffect(() => {
     let cancelled = false
-    getSnapshot(asOf, base)
+    getSnapshot(asOf, base, replaying)
       .then((snap) => {
         if (!cancelled) setSnapshot(snap)
       })
@@ -28,7 +30,7 @@ function useSnapshotLoader() {
     return () => {
       cancelled = true
     }
-  }, [asOf, base, setSnapshot])
+  }, [asOf, base, replaying, setSnapshot])
 }
 
 /** Live clock: every UPDATE_EVERY_MS the simulated "now" moves on 1 minute and everything refreshes */
@@ -44,9 +46,20 @@ function useLiveClock() {
   }, [live])
 }
 
+/** Replay clock: once a second the replayed moment moves on by the chosen speed */
+function useReplayClock() {
+  const playing = useAppStore((s) => s.replay?.playing ?? false)
+  useEffect(() => {
+    if (!playing) return
+    const id = window.setInterval(() => useAppStore.getState().replayTick(), 1000)
+    return () => window.clearInterval(id)
+  }, [playing])
+}
+
 export default function App() {
   useSnapshotLoader()
   useLiveClock()
+  useReplayClock()
   const mode = useAppStore((s) => s.mode)
 
   return (
@@ -71,6 +84,15 @@ export default function App() {
       {/* Bottom-left: convert card */}
       <div className="absolute bottom-3 left-3">
         <ConvertCard />
+      </div>
+
+      {/* Bottom-centre: replay the last day (kept clear of the Pro panel) */}
+      <div
+        className={`pointer-events-none absolute bottom-3 left-3 flex justify-center [&>*]:pointer-events-auto ${
+          mode === 'pro' ? 'right-[400px]' : 'right-3'
+        }`}
+      >
+        <ReplayBar />
       </div>
 
       {mode === 'pro' ? (
