@@ -17,17 +17,30 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+import time
 from typing import Optional, Sequence
 
+_STARTED = time.time()
+
+
+def log(msg: str) -> None:
+    print(f"[{time.time() - _STARTED:6.1f}s] {msg}", file=sys.stderr, flush=True)
+
+
+log("importing numpy/pandas/xgboost ...")
 import numpy as np
 import pandas as pd
 from xgboost import XGBRegressor
+log("importing torch ...")
 
 from loader import load_processed
 from models.xgboost_model import VOL_TENOR, build_features
 
 from .data import Bars
 from .train import load_checkpoint, pick_device, run_in_chunks
+
+log("imports done")
 
 
 def load_model(folder: str, device):
@@ -43,15 +56,19 @@ def load_model(folder: str, device):
 
 def predict(folder: str, data: str, last: int, device_name: str = "auto") -> pd.DataFrame:
     device = pick_device(device_name)
+    log(f"loading model from {folder} (device={device}) ...")
     meta, mean, components, xgb, model, tokenizer, cfg = load_model(folder, device)
     target = meta["target"]
 
+    log(f"loading data from {data} ...")
     series, _ = load_processed(data)
     if target == "vol":
         series = {k: df for k, df in series.items() if df.attrs["tenor"] == VOL_TENOR}
     if not series:
         raise ValueError(f"no instruments in {data} to predict {target} for")
 
+    log(f"tokenising {sum(len(df) for df in series.values()):,} bars "
+        f"({len(series)} instruments) ...")
     bars = Bars(series, tokenizer)
     frames, ends = [], []
     for instrument_id, df in series.items():
@@ -65,6 +82,7 @@ def predict(folder: str, data: str, last: int, device_name: str = "auto") -> pd.
     rows = pd.concat(frames, ignore_index=True)
     ends = np.concatenate(ends)
 
+    log(f"embedding {len(ends):,} windows ...")
     embeddings = run_in_chunks(model, bars, ends, cfg, device, model.embedding)
     reduced = (embeddings.astype(np.float64) - mean) @ components.T
     emb = pd.DataFrame(reduced.astype(np.float32), columns=meta["embedding_columns"])
@@ -75,6 +93,7 @@ def predict(folder: str, data: str, last: int, device_name: str = "auto") -> pd.
         raise ValueError(f"pairs not seen in training: {sorted(unknown)}")
     rows["pair"] = pd.Categorical(rows["pair"], categories=meta["pair_categories"])
 
+    log("predicting with XGBoost ...")
     pred = xgb.predict(rows[meta["features"] + meta["embedding_columns"]])
     out = rows[["instrument_id", "pair", "tenor", "timestamp"]].copy()
     out["pair"] = out["pair"].astype(str)
