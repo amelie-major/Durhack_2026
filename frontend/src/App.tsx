@@ -1,5 +1,6 @@
 /**
  * Layout: the globe fills the screen; small panels sit at the edges so it stays visible.
+ * Pro mode adds a slim history panel on the right (the globe stays visible on the left/centre).
  * Steps 5–7 add the forecast panel, execution strip and replay controls.
  */
 import { useEffect } from 'react'
@@ -7,6 +8,8 @@ import FxGlobe from './components/globe/FxGlobe'
 import ConvertCard from './components/convert/ConvertCard'
 import RatesTicker from './components/layout/RatesTicker'
 import StormLegend from './components/layout/StormLegend'
+import ProPanel from './components/pro/ProPanel'
+import ExtremeAlert from './components/layout/ExtremeAlert'
 import { getSnapshot } from './data/api'
 import { useAppStore } from './store/useAppStore'
 
@@ -28,8 +31,23 @@ function useSnapshotLoader() {
   }, [asOf, base, setSnapshot])
 }
 
+/** Live clock: every UPDATE_EVERY_MS the simulated "now" moves on 1 minute and everything refreshes */
+function useLiveClock() {
+  const live = useAppStore((s) => s.live)
+  useEffect(() => {
+    if (!live) return
+    const id = window.setInterval(() => {
+      const { nextUpdateAt, tick } = useAppStore.getState()
+      if (Date.now() >= nextUpdateAt) tick()
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [live])
+}
+
 export default function App() {
   useSnapshotLoader()
+  useLiveClock()
+  const mode = useAppStore((s) => s.mode)
 
   return (
     <div className="relative h-full w-full">
@@ -41,15 +59,31 @@ export default function App() {
         <RatesTicker />
       </header>
 
+      {/* Bright red warning when any pair is "Extreme" (≥ 1.5× its normal move) */}
+      <div
+        className={`pointer-events-none absolute top-15 left-3 flex justify-center [&>*]:pointer-events-auto ${
+          mode === 'pro' ? 'right-[400px]' : 'right-3'
+        }`}
+      >
+        <ExtremeAlert />
+      </div>
+
       {/* Bottom-left: convert card */}
       <div className="absolute bottom-3 left-3">
         <ConvertCard />
       </div>
 
-      {/* Bottom-right: volatility key */}
-      <div className="absolute bottom-3 right-3 hidden sm:block">
-        <StormLegend />
-      </div>
+      {mode === 'pro' ? (
+        /* Right: Pro panel (history + detail), between the top bar and the bottom edge */
+        <div className="absolute top-15 right-3 bottom-3 flex flex-col">
+          <ProPanel />
+        </div>
+      ) : (
+        /* Bottom-right: volatility key */
+        <div className="absolute bottom-3 right-3 hidden sm:block">
+          <StormLegend />
+        </div>
+      )}
     </div>
   )
 }
