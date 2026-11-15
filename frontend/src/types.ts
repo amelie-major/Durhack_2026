@@ -106,3 +106,31 @@ export type Tolerance = 'relaxed' | 'balanced' | 'cautious'
 export type ViewMode = 'simple' | 'pro'
 /** What the globe colours show */
 export type MapLayer = 'volatility' | 'signal'
+
+/* ---------- BETA (optional): hybrid model, GET /api/hybrid. Additive only. ---------- */
+
+/** One pair's 30-min-ahead predictions from the experimental hybrid model */
+export interface HybridPair {
+  pair: string
+  /** Forecast realised vol over the next `horizonMin` minutes, bp (1M forward) */
+  volBp: number | null
+  /** Forecast mean spread over the next `horizonMin` minutes, bp (1M forward) */
+  spreadBps: number | null
+  /** The same spread forecast for every tenor that has one, e.g. { "1W": 0.8, "3M": 1.1 } */
+  spreadByTenor: Record<string, number>
+}
+
+/** XGBoost + PRAGMA embeddings. Experimental, built on historical data (not the live feed). */
+export interface HybridPredictions {
+  status: 'beta'
+  model: string
+  horizonMin: number
+  available: boolean
+  /** Timestamp of the newest bar the predictions use */
+  dataAsOf?: string
+  /** When scripts/run_hybrid_beta.sh last ran */
+  generatedAt?: string
+  pairs: HybridPair[]
+  /** How to create the predictions when they're missing */
+  hint?: string
+}

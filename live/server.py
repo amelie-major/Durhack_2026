@@ -12,6 +12,8 @@ Endpoints
     GET /api/history?pair=USDJPY&hours=120[&asOf=...]
     GET /api/replay-range
     GET /api/health
+    GET /api/hybrid          BETA: XGBoost + PRAGMA embeddings, read from data/hybrid/
+                             (refresh with scripts/run_hybrid_beta.sh)
 
 With ``asOf`` the server time-travels: it answers as it would have at that
 moment, using only bars at or before it (replay mode in the frontend).
@@ -50,6 +52,8 @@ from models.xgboost_model import FEATURES, build_dataset, build_features, train,
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "processed"
 CACHE = ROOT / "data" / "live_forecast_models.pkl"
+HYBRID_DIR = ROOT / "data" / "hybrid"  # written by scripts/run_hybrid_beta.sh
+HYBRID_HEADLINE_TENOR = "1M"           # the tenor shown per pair (the vol model only has this one)
 
 HORIZONS = [5, 10, 15, 20, 25, 30]  # minutes; must match frontend HORIZONS_MIN
 WINDOW = 30                          # realised-vol window (minutes)
@@ -139,6 +143,44 @@ def load_bank(retrain: bool = False) -> dict:
     CACHE.write_bytes(pickle.dumps(bank))
     print(f"saved models to {CACHE}")
     return bank
+
+
+# ---------------------------------------------------------------------------
+# BETA: hybrid model predictions (XGBoost + PRAGMA embeddings)
+# ---------------------------------------------------------------------------
+
+def hybrid_predictions() -> dict:
+    """The latest hybrid-model predictions, from the CSVs scripts/run_hybrid_beta.sh writes.
+
+    These come from data/processed (historical bars), not the live Yahoo feed, and
+    the model is experimental, so the frontend shows them with a Beta badge.
+    """
+    files = {t: HYBRID_DIR / f"{t}_now.csv" for t in ("vol", "spread")}
+    found = {t: pd.read_csv(f) for t, f in files.items() if f.exists()}
+    base = {"status": "beta", "model": "PRAGMA hybrid (XGBoost + PRAGMA embeddings)",
+            "horizonMin": 30}
+    if not found:
+        return {**base, "available": False, "pairs": [],
+                "hint": "run scripts/run_hybrid_beta.sh to create data/hybrid/*_now.csv"}
+
+    pairs: Dict[str, dict] = {}
+    for target, df in found.items():
+        for row in df.itertuples(index=False):
+            entry = pairs.setdefault(row.pair, {"pair": row.pair, "volBp": None,
+                                                "spreadBps": None, "spreadByTenor": {}})
+            value = round(float(row.pred_bp), 4)
+            if target == "vol":
+                entry["volBp"] = value
+            else:
+                entry["spreadByTenor"][row.tenor] = value
+                if row.tenor == HYBRID_HEADLINE_TENOR:
+                    entry["spreadBps"] = value
+    stamps = pd.concat([pd.to_datetime(df["timestamp"], utc=True) for df in found.values()])
+    generated = max(f.stat().st_mtime for t, f in files.items() if t in found)
+    return {**base, "available": True,
+            "dataAsOf": stamps.max().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generatedAt": pd.Timestamp(generated, unit="s", tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "pairs": [pairs[p] for p in sorted(pairs)]}
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +556,8 @@ def make_handler(engine: Engine):
                     self._send(200 if hist else 404, hist or {"error": "unknown pair"})
                 elif url.path == "/api/replay-range":
                     self._send(200, engine.replay_range())
+                elif url.path == "/api/hybrid":
+                    self._send(200, hybrid_predictions())
                 else:
                     self._send(404, {"error": "not found"})
             except ValueError as e:  # bad asOf / hours
