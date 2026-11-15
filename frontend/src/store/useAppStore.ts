@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import type { CurrencyCode, Snapshot, Tolerance, ViewMode } from '../types'
 import { HOME_CURRENCY, ZONES, type CurrencyZone } from '../data/currencies'
+import { USING_LIVE_DATA } from '../data/api'
 
 export interface SelectedCountry {
   code: string // ISO alpha-3 of the clicked country ("" when chosen from the dropdown)
@@ -18,7 +19,8 @@ export interface CameraFocus {
 }
 
 /** How often the forecasts refresh. The data is 1-minute bars, so the model updates every minute. */
-export const UPDATE_EVERY_MS = 60_000
+/** Live Yahoo data refreshes every 15 s (the latest price moves within the minute). */
+export const UPDATE_EVERY_MS = USING_LIVE_DATA ? 15_000 : 60_000
 
 interface AppState {
   /** The simulated "now" (the data is historical). The live clock moves it 1 min per real minute. */
@@ -67,14 +69,16 @@ function focusZone(code: CurrencyCode): Pick<AppState, 'selected' | 'focus'> {
 /** Demo moment: USD/JPY stormy, EUR/USD calm, USD/SGD unsettled (mock data). */
 export const DEMO_AS_OF = '2026-07-02T18:40:00Z'
 
+const nowIso = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+
 export const useAppStore = create<AppState>()((set, get) => ({
-  asOf: DEMO_AS_OF,
+  asOf: USING_LIVE_DATA ? nowIso() : DEMO_AS_OF,
   live: true,
   nextUpdateAt: Date.now() + UPDATE_EVERY_MS,
   setLive: (live) => set({ live, nextUpdateAt: Date.now() + UPDATE_EVERY_MS }),
   tick: () =>
     set((s) => ({
-      asOf: new Date(new Date(s.asOf).getTime() + 60_000).toISOString().replace('.000Z', 'Z'),
+      asOf: USING_LIVE_DATA ? nowIso() : new Date(new Date(s.asOf).getTime() + 60_000).toISOString().replace('.000Z', 'Z'),
       nextUpdateAt: Date.now() + UPDATE_EVERY_MS,
     })),
   tolerance: 'balanced',
