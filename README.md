@@ -38,6 +38,18 @@ Expected result: 30 instruments (27 forward, 3 spot) and 0 errors. Spot files ha
 
 Use `--product forward` or `--product spot` (`-p`) to load only one kind. From Python: `load_all(paths, product="spot")`.
 
+## More currency pairs (optional)
+
+Challenge1 has three pairs. `fetch_dukascopy.py` downloads 1-minute spot bars with bid and ask for 18 more from Dukascopy's free datafeed (GBP, AUD, NZD, CHF, CAD, CNH, HKD, MXN, ZAR, NOK, SEK, PLN and TRY against USD, plus five crosses) and writes them in the Challenge1 spot format:
+
+```bash
+python fetch_dukascopy.py                        # all default pairs, same dates as Challenge1
+python fetch_dukascopy.py --pairs GBPUSD USDMXN  # or just some
+python loader.py data/raw/Challenge1.zip data/raw/dukascopy data/processed
+```
+
+The server is slow and throttles (2 to 10 seconds per file, 124 files per pair), so the full list takes a few hours. `--workers 16` is about six times faster than the default of 4. Downloads are cached in `data/raw/dukascopy/cache/`; if it stops, run it again and it carries on. `python fetch_dukascopy.py --validate` compares the three overlapping pairs with Challenge1. See [DATA_OVERVIEW.md](DATA_OVERVIEW.md#extra-pairs-from-dukascopy) for what matches and what doesn't.
+
 ## Use it from Python
 
 From a script or notebook in the repo root:

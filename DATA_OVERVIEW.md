@@ -71,3 +71,28 @@ Checked on the full data by aligning every tenor to the 1M tenor of the same pai
 - **Spread is different.** The level rises with tenor and the correlation with 1M is lower (down to 0.88), so spread carries real tenor-specific information.
 - **Forward points are tenor-specific**, as expected (`fp_bp` for EURUSD runs from +2.8 bp at 1W to +146 bp at 1Y).
 - **Consequence:** treat the data as 3 price series for volatility. An unseen-tenor test is not a meaningful volatility test, so holding out a pair (`split_instruments`) is the honest generalisation test. Unseen tenor remains a fair test for spread and forward points.
+
+## Extra pairs from Dukascopy
+
+`fetch_dukascopy.py` adds spot pairs that Challenge1 does not have, from Dukascopy's free datafeed, in the Challenge1 spot file format. They load as `PAIR_BASE_SPOT_SPOT_1000000` instruments with no loader changes.
+
+- **USD pairs (13 new currencies):** GBPUSD, AUDUSD, NZDUSD, USDCHF, USDCAD, USDCNH, USDHKD, USDMXN, USDZAR, USDNOK, USDSEK, USDPLN, USDTRY.
+- **Crosses that close a triangle with pairs we have:** EURJPY, EURGBP, GBPJPY, EURSGD, SGDJPY.
+- **Dates:** 2026-07-01 to 2026-08-31, the same as Challenge1.
+- **Spot only.** There are no forward points; we found no free source of intraday forward points.
+
+### How well it matches Challenge1
+
+Checked with `python fetch_dukascopy.py --validate` on the three pairs both sources have, for 1–10 July 2026 (about 11,400 Challenge1 bars per pair).
+
+| Pair | Bars also in Dukascopy | 1-min return corr | Mean mid difference | Mean spread, Challenge1 | Mean spread, Dukascopy | Spread corr | Same settlement date |
+|---|---|---|---|---|---|---|---|
+| EURUSD | 98.4% | 0.993 | 0.05 bp | 0.17 bp | 0.36 bp | 0.84 | 99.9% |
+| USDJPY | 98.7% | 0.992 | 0.05 bp | 0.21 bp | 0.36 bp | 0.79 | 99.9% |
+| USDSGD | 97.3% | 0.940 | 0.11 bp | 0.56 bp | 1.50 bp | 0.96 | 99.9% |
+
+- **Prices and volatility match.** Mids agree to about a tenth of a basis point, so the extra pairs are good for volatility and direction work.
+- **Spread level does not match.** Dukascopy quotes are 1.7 to 2.7 times wider than Challenge1's, although they move together (correlation 0.79–0.96). Do not mix the two sources' `spread_bp` in one spread model without rescaling per source.
+- **Timestamps:** Dukascopy stamps the start of a bar and Challenge1 the end. The fetcher adds one minute; without it the return correlation is about −0.04.
+- **Quiet minutes** (no ticks) are dropped, as in Challenge1.
+- **Settlement date** is derived, not downloaded: the trade date rolls at 21:00 UTC, then two business days (one for USDCAD and USDTRY). Weekends are skipped but bank holidays are not, so dates around a holiday in either currency can be a day early.
