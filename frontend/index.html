@@ -250,6 +250,12 @@ function init(world) {
 
 const instFor = p => data.instruments.find(i => i.pair === p && i.tenor === tenor);
 const actLabel = a => a > 0 ? ["BUY", "--buy"] : a < 0 ? ["SELL", "--sell"] : ["HOLD", "--neutral"];
+// Model signal from the score: past the trading hurdle (|expected move| > threshold x spread)
+// maps to score > tanh-cutoff 0.8808 (BUY) or < 0.1192 (SELL). Shown even while a trade is
+// already open, unlike `action`, which only marks the minute a trade is opened.
+const BUY_CUT = 0.5 + 0.5 * Math.tanh(1), SELL_CUT = 1 - BUY_CUT;
+const sigOf = (i, k) => { const s = i && data.score[i.id][k];
+  return s == null ? 0 : s > BUY_CUT ? 1 : s < SELL_CUT ? -1 : 0; };
 
 function render() {
   const { proj, pairs } = window.__ctx;
@@ -258,7 +264,7 @@ function render() {
 
   d3.selectAll(".arc")
     .attr("stroke", p => { const i = instFor(p); return col(val(i, t)); })
-    .attr("stroke-width", p => { const i = instFor(p); return i && data.action[i.id][t] ? 7 : 4; })
+    .attr("stroke-width", p => { const i = instFor(p); return sigOf(i, t) ? 7 : 4; })
     .classed("sel", p => p === selected);
 
   // Volatility warnings: current vol above k × that instrument's median.
@@ -282,12 +288,12 @@ function render() {
     .attr("transform", mid)
     .select("title").text(p => `${p} ${tenor}: volatility ${ratio(p).toFixed(1)}× normal`);
 
-  // Pulse ring on the base-currency hub when the model trades.
-  const trades = pairs.map(p => ({ p, i: instFor(p) })).filter(d => d.i && data.action[d.i.id][t]);
+  // Pulse ring on the hub whenever the model signals BUY/SELL.
+  const trades = pairs.map(p => ({ p, i: instFor(p) })).filter(d => d.i && sigOf(d.i, t));
   d3.select("#pulses").selectAll("circle").data(trades, d => d.p + t).join(
     enter => enter.append("circle").attr("class", "pulse")
       .attr("transform", d => `translate(${proj(HUBS[d.p.slice(3,6)].lonlat)})`)
-      .attr("stroke", d => css(actLabel(data.action[d.i.id][t])[1]))
+      .attr("stroke", d => css(actLabel(sigOf(d.i, t))[1]))
       .attr("r", 4).attr("opacity", 1)
       .call(s => s.transition().duration(900).attr("r", 22).attr("opacity", 0).remove()));
 
@@ -296,7 +302,7 @@ function render() {
     .on("click", (e, p) => { selected = p; render(); })
     .html(p => {
       const i = instFor(p); if (!i) return `<span>${p}</span><span>–</span>`;
-      const s = val(i, t), [lab, c] = actLabel(data.action[i.id][t]);
+      const s = val(i, t), [lab, c] = actLabel(sigOf(i, t));
       return `<span>${warnSet.has(p) ? '<span style="color:var(--warn)">⚠</span> ' : ""}${p} <b style="color:${col(s)}">${fmt(s)}</b></span>
               <span class="pill" style="background:${css(c)}">${lab}</span>`;
     });
@@ -305,12 +311,13 @@ function render() {
   const i = selected && instFor(selected);
   document.getElementById("d-title").textContent = i ? i.id : "Select a pair";
   if (!i) { d3.select("#d-body").html("No data for this tenor"); d3.select("#spark").selectAll("*").remove(); return; }
-  const s = data.score[i.id][t], cm = data.close_mid[i.id][t], [lab] = actLabel(data.action[i.id][t]);
+  const s = data.score[i.id][t], cm = data.close_mid[i.id][t], [lab] = actLabel(sigOf(i, t)), opened = data.action[i.id][t];
   d3.select("#d-body").html((warnSet.has(selected)
     ? `<div class="banner">⚠ High volatility: ${ratio(selected).toFixed(1)}× this instrument's normal level</div>` : "") + `
     <div class="row"><span>Score (P buy)</span><span>${s == null ? "–" : s.toFixed(3)}</span></div>
     <div class="row"><span>${data.vol_kind === "predicted" ? "Predicted vol, next 10 min (bp)" : "Realised vol (bp/min)"}</span><span>${data.vol ? (data.vol[i.id][t] ?? "–") : "–"}</span></div>
-    <div class="row"><span>Action</span><span>${lab}</span></div>
+    <div class="row"><span>Signal</span><span>${lab}</span></div>
+    <div class="row"><span>Trade opened</span><span>${opened ? actLabel(opened)[0] : "–"}</span></div>
     <div class="row"><span>Close mid</span><span>${cm ?? "–"}</span></div>
     <div class="row"><span>Trades so far</span><span>${data.action[i.id].slice(0, t + 1).filter(a => a).length}</span></div>`);
 
