@@ -14,14 +14,14 @@
 #
 # Options (environment variables):
 #     HYBRID_REPO    checkout of models/hybrid-h30   (default: ../Durhack_hybrid)
-#     HYBRID_REMOTE  where to clone it from          (default: git@github.com:amelie-major/Durhack_2026.git)
+#     HYBRID_REMOTE  where to clone it from          (default: this repo's origin URL)
 #     PY             python with torch + xgboost     (default: .venv/bin/python, else python3)
 #     TARGETS        which models to run             (default: "spread vol")
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HYBRID_REPO="${HYBRID_REPO:-$ROOT/../Durhack_hybrid}"
-HYBRID_REMOTE="${HYBRID_REMOTE:-git@github.com:amelie-major/Durhack_2026.git}"
+HYBRID_REMOTE="${HYBRID_REMOTE:-$(git -C "$ROOT" remote get-url origin 2>/dev/null || echo https://github.com/amelie-major/Durhack_2026.git)}"
 BRANCH="models/hybrid-h30"
 TARGETS="${TARGETS:-spread vol}"
 if [ -z "${PY:-}" ]; then
