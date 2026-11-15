@@ -333,6 +333,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"\n  stopped: {e}. Rerun later; finished days are cached.")
             failed.append(pair)
             continue
+        # The last minute of the range ends at midnight; drop it so the series
+        # stops on the end date instead of adding a one-bar day.
+        bars = bars[bars["timestamp"] < pd.Timestamp(days[-1], tz="UTC") + pd.Timedelta(days=1)]
         if bars.empty:
             print("  no data (Dukascopy may not carry this pair)")
             failed.append(pair)

@@ -96,3 +96,26 @@ Checked with `python fetch_dukascopy.py --validate` on the three pairs both sour
 - **Timestamps:** Dukascopy stamps the start of a bar and Challenge1 the end. The fetcher adds one minute; without it the return correlation is about −0.04.
 - **Quiet minutes** (no ticks) are dropped, as in Challenge1.
 - **Settlement date** is derived, not downloaded: the trade date rolls at 21:00 UTC, then two business days (one for USDCAD and USDTRY). Weekends are skipped but bank holidays are not, so dates around a holiday in either currency can be a day early.
+
+### What was downloaded
+
+All 18 pairs were available. Run through the loader: 953 daily files, 0 errors, 0 dropped rows.
+
+- 16 pairs have 53 days and 62,600–63,200 bars, the same as Challenge1's EURUSD and USDJPY.
+- **USDHKD** has 57,302 bars: the peg means more minutes with no ticks. Its 1-minute return std is 0.09 bp, against about 1 bp for the majors.
+- **USDTRY** has 52 days and 52,235 bars, with a return std of 0.27 bp. Treat both as unusual series rather than extra examples of a normal pair.
+- Mean spread runs from 0.35 bp (USDHKD) to 4.3 bp (USDZAR), far wider than anything in Challenge1.
+
+### Triangle check
+
+Each cross was compared with the product of its two USD legs over the full two months, using Challenge1 spot for EURUSD, USDJPY and USDSGD and Dukascopy for the rest.
+
+| Cross | Built from | Mean absolute difference | 99th percentile | 1-min return corr |
+|---|---|---|---|---|
+| EURJPY | EURUSD × USDJPY | 0.11 bp | 0.70 bp | 0.990 |
+| GBPJPY | GBPUSD × USDJPY | 0.12 bp | 1.14 bp | 0.983 |
+| EURGBP | EURUSD ÷ GBPUSD | 0.12 bp | 1.19 bp | 0.896 |
+| EURSGD | EURUSD × USDSGD | 0.13 bp | 1.28 bp | 0.855 |
+| SGDJPY | USDJPY ÷ USDSGD | 0.19 bp | 1.81 bp | 0.969 |
+
+The triangles hold to a fraction of the spread, so a cross's price carries no information beyond its two USD legs. The lower return correlations for EURGBP and EURSGD are because those crosses barely move (return std 0.5–0.6 bp), so quote noise is a larger share of each return.

@@ -48,7 +48,11 @@ python fetch_dukascopy.py --pairs GBPUSD USDMXN  # or just some
 python loader.py data/raw/Challenge1.zip data/raw/dukascopy data/processed
 ```
 
-The server is slow and throttles (2 to 10 seconds per file, 124 files per pair), so the full list takes a few hours. `--workers 16` is about six times faster than the default of 4. Downloads are cached in `data/raw/dukascopy/cache/`; if it stops, run it again and it carries on. `python fetch_dukascopy.py --validate` compares the three overlapping pairs with Challenge1. See [DATA_OVERVIEW.md](DATA_OVERVIEW.md#extra-pairs-from-dukascopy) for what matches and what doesn't.
+The server is slow and throttles (2 to 10 seconds per file, 124 files per pair), so the full list takes a few hours. `--workers 16` is about six times faster than the default of 4. Downloads are cached in `data/raw/dukascopy/cache/`; if it stops, run it again and it carries on. To skip the download, take `dukascopy.zip` (22 MB) from the shared drive, put it in `data/raw/` and pass it to the loader in place of `data/raw/dukascopy`.
+
+XGBoost trains on the new pairs for both targets (`python -m models.xgboost_model --target vol`); for volatility it uses a pair's 1M forward, or its spot series when the pair has no forwards. The PRAGMA and signal models still use 1M forwards only, so they ignore the new pairs.
+
+`python fetch_dukascopy.py --validate` compares the three overlapping pairs with Challenge1. See [DATA_OVERVIEW.md](DATA_OVERVIEW.md#extra-pairs-from-dukascopy) for what matches and what doesn't.
 
 ## Use it from Python
 

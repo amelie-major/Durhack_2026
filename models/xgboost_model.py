@@ -201,12 +201,23 @@ def baseline_prediction(features: pd.DataFrame, target: str, horizon: int) -> pd
 # Dataset
 # ==========================================================================
 
+def _vol_instruments(series: Dict[str, pd.DataFrame]) -> set:
+    """One instrument per pair for volatility: its 1M forward, or spot if it has no 1M."""
+    chosen: Dict[str, str] = {}
+    for instrument_id, df in series.items():
+        pair, tenor = df.attrs["pair"], df.attrs["tenor"]
+        if tenor == VOL_TENOR or (tenor == "SPOT" and pair not in chosen):
+            chosen[pair] = instrument_id
+    return set(chosen.values())
+
+
 def _instrument_rows(series: Dict[str, pd.DataFrame], target: str,
                      horizon: int) -> List[pd.DataFrame]:
     """Features, target and baseline for each instrument the target uses."""
+    vol_instruments = _vol_instruments(series)
     result = []
-    for df in series.values():
-        if target == "vol" and len(series) > 1 and df.attrs["tenor"] != VOL_TENOR:
+    for instrument_id, df in series.items():
+        if target == "vol" and len(series) > 1 and instrument_id not in vol_instruments:
             continue  # other tenors would count each price move again (a lone instrument is kept)
 
         rows = build_features(df, target, horizon)
