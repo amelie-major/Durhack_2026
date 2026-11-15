@@ -179,25 +179,6 @@ export default function FxGlobe() {
     [levelColor, zoneLevels, mapLayer, base, colors, signalColor, snapshot],
   )
 
-  // Keep latest live data & helpers in a ref so arc/ring accessors read fresh values
-  // without forcing Three.js to recreate meshes or reset animation clocks on each timeframe tick
-  const liveRef = useRef({
-    snapshot,
-    mapLayer,
-    tolerance,
-    colors,
-    levelColor,
-    signalColor,
-  })
-  liveRef.current = {
-    snapshot,
-    mapLayer,
-    tolerance,
-    colors,
-    levelColor,
-    signalColor,
-  }
-
   // Only rebuild arc objects when the set of currency pairs actually changes
   const pairSignature = useMemo(
     () =>
@@ -209,7 +190,7 @@ export default function FxGlobe() {
   )
 
   const arcs = useMemo<StableArc[]>(() => {
-    return (liveRef.current.snapshot?.pairs ?? []).flatMap((pair) => {
+    return (snapshot?.pairs ?? []).flatMap((pair) => {
       const a = ZONE_BY_CODE.get(pair.base)
       const b = ZONE_BY_CODE.get(pair.quote)
       if (!a || !b) return []
@@ -225,11 +206,15 @@ export default function FxGlobe() {
         },
       ]
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairSignature])
 
-  const getPairForArc = useCallback((arc: StableArc) => {
-    return liveRef.current.snapshot?.pairs.find((p) => p.base === arc.base && p.quote === arc.quote)
-  }, [])
+  const getPairForArc = useCallback(
+    (arc: StableArc) => {
+      return snapshot?.pairs.find((p) => p.base === arc.base && p.quote === arc.quote)
+    },
+    [snapshot?.pairs],
+  )
 
   // 1. Load country shapes once (local file, so venue wifi can't break it)
   useEffect(() => {
@@ -270,7 +255,7 @@ export default function FxGlobe() {
 
   const rings = useMemo<StableRing[]>(() => {
     if (!activeRingKeys) return []
-    return activeRingKeys.split('|').flatMap((key) => {
+    return activeRingKeys.split('|').flatMap<StableRing>((key) => {
       if (key.startsWith('zone:')) {
         const code = key.slice(5)
         const z = ZONE_BY_CODE.get(code)
@@ -288,48 +273,48 @@ export default function FxGlobe() {
     })
   }, [activeRingKeys])
 
-  const ringColor = useCallback((obj: object) => {
-    const ring = obj as StableRing
-    return (t: number) => {
-      const { colors: c, snapshot: snap, signalColor: sigColor } = liveRef.current
-      let baseColor = c.extreme
-      if (ring.pairId) {
-        const [b, q] = ring.pairId.split('-')
-        const pair = snap?.pairs.find((p) => p.base === b && p.quote === q)
-        baseColor = sigColor(pair)
+  const ringColor = useCallback(
+    (obj: object) => {
+      const ring = obj as StableRing
+      return (t: number) => {
+        let baseColor = colors.extreme
+        if (ring.pairId) {
+          const [b, q] = ring.pairId.split('-')
+          const pair = snapshot?.pairs.find((p) => p.base === b && p.quote === q)
+          baseColor = signalColor(pair)
+        }
+        return withAlpha(baseColor, Math.max(0, 1 - t))
       }
-      return withAlpha(baseColor, Math.max(0, 1 - t))
-    }
-  }, [])
+    },
+    [colors.extreme, snapshot?.pairs, signalColor],
+  )
 
   const arcColor = useCallback(
     (obj: object) => {
       const pair = getPairForArc(obj as StableArc)
-      const { mapLayer: layer, tolerance: tol, signalColor: sigColor, levelColor: lvlColor, colors: c } = liveRef.current
-      if (!pair) return c.nodata
-      return layer === 'signal' ? sigColor(pair) : lvlColor(levelFor(pair, tol))
+      if (!pair) return colors.nodata
+      return mapLayer === 'signal' ? signalColor(pair) : levelColor(levelFor(pair, tolerance))
     },
-    [getPairForArc],
+    [getPairForArc, mapLayer, signalColor, levelColor, tolerance, colors.nodata],
   )
 
   const arcStroke = useCallback(
     (obj: object) => {
       const pair = getPairForArc(obj as StableArc)
       const action = actionFor(pair)
-      const isSignalActive = liveRef.current.mapLayer === 'signal' && (action === 'buy' || action === 'sell')
+      const isSignalActive = mapLayer === 'signal' && (action === 'buy' || action === 'sell')
       return isSignalActive ? 0.9 : 0.5
     },
-    [getPairForArc],
+    [getPairForArc, mapLayer],
   )
 
   const arcLabel = useCallback(
     (obj: object) => {
       const pair = getPairForArc(obj as StableArc)
       if (!pair) return ''
-      const { mapLayer: layer, tolerance: tol } = liveRef.current
-      return arcTooltip(pair, layer, levelFor(pair, tol))
+      return arcTooltip(pair, mapLayer, levelFor(pair, tolerance))
     },
-    [getPairForArc],
+    [getPairForArc, mapLayer, tolerance],
   )
 
   /** Clicking a line points the app at that pair (its currency that isn't the "From" one) */
