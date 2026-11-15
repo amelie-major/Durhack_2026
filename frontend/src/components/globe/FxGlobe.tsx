@@ -7,14 +7,18 @@
  * - Click empty globe or press Esc to clear the selection and resume spinning
  * - Respects the OS "reduce motion" setting (no spin, instant camera moves)
  *
- * Step 3 replaces the single "forecast available" tint with storm colours from mock data.
+ * - Lit zones are coloured by their volatility level vs the "From" currency (Calm / Unsettled / Storm);
+ *   the "From" currency's own zone is the accent colour; zones with no usable data are slate.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Globe, { type GlobeMethods } from 'react-globe.gl'
-import { HOME_CURRENCY, SINGAPORE_MARKER, ZONE_BY_COUNTRY, type CurrencyZone } from '../../data/currencies'
+import { SINGAPORE_MARKER, ZONES, ZONE_BY_COUNTRY, type CurrencyZone } from '../../data/currencies'
 import { countryCode, escapeHtml, type CountryFeature } from '../../lib/geo'
 import { usePrefersReducedMotion, useWindowSize } from '../../lib/hooks'
+import { costBand, costRatioPct, LEVEL_INFO } from '../../lib/storm'
 import { cssVar, withAlpha } from '../../lib/theme'
+import { findPair, zoneLevel, type ZoneLevel } from '../../lib/zones'
+import type { Snapshot } from '../../types'
 import { useAppStore } from '../../store/useAppStore'
 
 const RESUME_SPIN_AFTER_MS = 3000
@@ -25,13 +29,26 @@ const FOCUS_ALTITUDE = 1.9
 
 type SingaporeMarker = typeof SINGAPORE_MARKER
 
-function tooltipHtml(name: string, zone: CurrencyZone | null): string {
-  const detail = !zone
-    ? 'No forecast'
-    : zone.code === HOME_CURRENCY
-      ? `${zone.code} · home currency`
-      : `${zone.code} · forecast available`
-  return `<div class="globe-tip"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(detail)}</span></div>`
+function tooltipHtml(
+  name: string,
+  zone: CurrencyZone | null,
+  level: ZoneLevel | undefined,
+  snapshot: Snapshot | null,
+  from: string,
+): string {
+  const lines: string[] = []
+  if (!zone) lines.push('No forecast for this country')
+  else if (level === 'home') lines.push(`${zone.code} · your "From" currency`)
+  else if (!level || level === 'nodata') lines.push(`${zone.code} · no reliable data right now`)
+  else {
+    const info = LEVEL_INFO[level]
+    lines.push(`${zone.code} · ${info.name} · ${info.volatility.toLowerCase()} (next 30 min)`)
+    const pair = findPair(snapshot, from, zone.code)
+    const band = pair ? costBand(costRatioPct(pair)) : null
+    if (band) lines.push(band.label)
+  }
+  const body = lines.map((l) => `<span>${escapeHtml(l)}</span>`).join('')
+  return `<div class="globe-tip"><strong>${escapeHtml(name)}</strong>${body}</div>`
 }
 
 export default function FxGlobe() {
@@ -40,6 +57,9 @@ export default function FxGlobe() {
 
   const selectedCode = useAppStore((s) => s.selected?.code ?? null)
   const quote = useAppStore((s) => s.quote)
+  const base = useAppStore((s) => s.base)
+  const snapshot = useAppStore((s) => s.snapshot)
+  const tolerance = useAppStore((s) => s.tolerance)
   const focus = useAppStore((s) => s.focus)
   const selectCountry = useAppStore((s) => s.selectCountry)
   const clearSelection = useAppStore((s) => s.clearSelection)
@@ -61,11 +81,37 @@ export default function FxGlobe() {
   const colors = useMemo(
     () => ({
       accent: cssVar('--color-accent', '#7c9cff'),
-      accentBright: cssVar('--color-accent-bright', '#b4c6ff'),
       ink: cssVar('--color-ink', '#e6ebf5'),
       nodata: cssVar('--color-nodata', '#334155'),
+      calm: cssVar('--color-calm', '#2dd4bf'),
+      unsettled: cssVar('--color-unsettled', '#fbbf24'),
+      storm: cssVar('--color-storm', '#f43f8e'),
     }),
     [],
+  )
+
+  // Volatility level of each currency zone, seen from the "From" currency
+  const zoneLevels = useMemo(
+    () => new Map<string, ZoneLevel>(ZONES.map((z) => [z.code, zoneLevel(snapshot, z.code, base, tolerance)])),
+    [snapshot, base, tolerance],
+  )
+
+  const levelColor = useCallback(
+    (level: ZoneLevel | undefined) => {
+      if (level === 'home') return colors.accent
+      if (!level || level === 'nodata') return colors.nodata
+      return colors[level]
+    },
+    [colors],
+  )
+
+  /** Colour for a country code, or null if it isn't in a currency zone */
+  const zoneColor = useCallback(
+    (code: string) => {
+      const zone = ZONE_BY_COUNTRY.get(code)
+      return zone ? levelColor(zoneLevels.get(zone.code)) : null
+    },
+    [levelColor, zoneLevels],
   )
 
   // 1. Load country shapes once (local file, so venue wifi can't break it)
@@ -150,26 +196,27 @@ export default function FxGlobe() {
   const capColor = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
-      const lit = ZONE_BY_COUNTRY.has(code)
-      if (lit) return withAlpha(isActive(code) ? colors.accentBright : colors.accent, isActive(code) ? 1 : 0.8)
+      const color = zoneColor(code)
+      if (color) return withAlpha(color, isActive(code) ? 1 : 0.78)
       return withAlpha(colors.nodata, isActive(code) ? 0.75 : 0.35)
     },
-    [colors, isActive],
+    [colors, isActive, zoneColor],
   )
 
   const sideColor = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
-      return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.accent, 0.6) : withAlpha(colors.nodata, 0.15)
+      const color = zoneColor(code)
+      return color ? withAlpha(color, 0.55) : withAlpha(colors.nodata, 0.15)
     },
-    [colors],
+    [colors, zoneColor],
   )
 
   const strokeColor = useCallback(
     (obj: object) => {
       const code = countryCode((obj as CountryFeature).properties)
       if (code === selectedCode) return colors.ink
-      return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.accentBright, 0.9) : withAlpha(colors.ink, 0.12)
+      return ZONE_BY_COUNTRY.has(code) ? withAlpha(colors.ink, 0.45) : withAlpha(colors.ink, 0.12)
     },
     [colors, selectedCode],
   )
@@ -184,10 +231,21 @@ export default function FxGlobe() {
     [selectedCode, isActive],
   )
 
-  const polygonLabel = useCallback((obj: object) => {
-    const p = (obj as CountryFeature).properties
-    return tooltipHtml(p.NAME, ZONE_BY_COUNTRY.get(countryCode(p)) ?? null)
-  }, [])
+  const tooltipFor = useCallback(
+    (name: string, code: string) => {
+      const zone = ZONE_BY_COUNTRY.get(code) ?? null
+      return tooltipHtml(name, zone, zone ? zoneLevels.get(zone.code) : undefined, snapshot, base)
+    },
+    [zoneLevels, snapshot, base],
+  )
+
+  const polygonLabel = useCallback(
+    (obj: object) => {
+      const p = (obj as CountryFeature).properties
+      return tooltipFor(p.NAME, countryCode(p))
+    },
+    [tooltipFor],
+  )
 
   // 5. Interaction handlers
   const handlePolygonClick = useCallback(
@@ -250,10 +308,10 @@ export default function FxGlobe() {
         pointsData={singaporeData}
         pointLat="lat"
         pointLng="lng"
-        pointColor={() => colors.accentBright}
+        pointColor={() => zoneColor('SGP') ?? colors.nodata}
         pointAltitude={(obj: object) => (isActive((obj as SingaporeMarker).code) ? 0.05 : 0.025)}
         pointRadius={1.1}
-        pointLabel={(obj: object) => tooltipHtml((obj as SingaporeMarker).name, ZONE_BY_COUNTRY.get('SGP') ?? null)}
+        pointLabel={(obj: object) => tooltipFor((obj as SingaporeMarker).name, 'SGP')}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
         // Clicking empty globe clears the selection

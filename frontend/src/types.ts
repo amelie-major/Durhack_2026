@@ -1,15 +1,15 @@
 /**
  * Shared data contract between the model team and the UI.
- * PROPOSAL v1 — agree with the team, then change it in ONE place (here).
- * See project doc "UI plan & build instructions (Emilia)", section 4.
+ * PROPOSAL v2 (15 Nov) — agree with the team, then change it in ONE place (here).
+ * v2 adds `base` and `status` to PairSnapshot. See "DurHack decisions & to-do".
  */
 
-export type CurrencyCode = string // e.g. "GBP", "JPY"
+export type CurrencyCode = string // e.g. "USD", "JPY"
 
 export interface PairForecast {
-  /** Minutes ahead for each forecast point, e.g. [5, 10, ..., 60] */
+  /** Minutes ahead for each forecast point, e.g. [5, 10, ..., 30] */
   horizonsMin: number[]
-  /** Forecast volatility at each horizon (same length as horizonsMin) */
+  /** Forecast realised volatility in bp at each horizon (same length as horizonsMin) */
   vol: number[]
   /** Forecast spread in basis points at each horizon */
   spreadBps: number[]
@@ -18,8 +18,12 @@ export interface PairForecast {
   volHigh?: number[]
 }
 
+/** Data state of one pair at the simulated "now". See the "Data gaps" table in the decisions doc. */
+export type PairStatus = 'live' | 'rollover' | 'stale' | 'no_data' | 'thin'
+
 export interface PairSnapshot {
-  pair: string // "GBPJPY"
+  pair: string // market convention, e.g. "USDJPY"
+  base: CurrencyCode // "USD"  (v2)
   quote: CurrencyCode // "JPY"
   bid: number
   ask: number
@@ -27,8 +31,9 @@ export interface PairSnapshot {
   spreadBps: number
   realizedVol30m: number
   forecast: PairForecast
-  /** How unusual current vol is vs this pair's own history, 0–1. Drives globe colour. */
+  /** How unusual forecast vol is vs this pair's own history, 0–1. Drives globe colour. */
   percentile: number
+  status: PairStatus // (v2)
 }
 
 export interface Snapshot {

@@ -12,6 +12,11 @@ export default function StormLegend() {
         </li>
       ))}
       <li className="text-ink-muted flex items-center gap-2">
+        <span className="mx-0.5 size-3 rounded-sm bg-accent" aria-hidden />
+        <span className="w-16">From</span>
+        <span>Your own currency</span>
+      </li>
+      <li className="text-ink-muted flex items-center gap-2">
         <span className="mx-0.5 size-3 rounded-sm bg-nodata" aria-hidden />
         <span className="w-16">No data</span>
         <span>No forecast here</span>
