@@ -108,6 +108,11 @@ backbone, not a forecasting model. It serves the predictions PRAGMA made in its 
 - Only 30-minute forecasts were saved. Shorter horizons are derived from them (vol scaled by
   sqrt(h / 30), spread kept the same).
 - There is no Buy / Sell signal in PRAGMA mode.
+- The two models use different data. XGBoost trains on all of `data/processed` (Challenge1 plus
+  Dukascopy pairs). PRAGMA covers only the three Challenge1 pairs it was trained on (EURUSD, USDJPY,
+  USDSGD 1M forwards). By default PRAGMA's bars also come from `data/processed`, whose Challenge1
+  instruments are unchanged by the Dukascopy feed. To read them from a Challenge1-only folder, use
+  `--pragma-data path/to/processed`. The server refuses predictions that don't match the bars.
 
 ## Tests
 

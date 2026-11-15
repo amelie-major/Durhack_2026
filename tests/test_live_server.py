@@ -271,3 +271,34 @@ def test_pick_model(engine, pragma):
     engine.pragma, engine.default_model = pragma, "pragma"
     assert engine.pick_model(None) == "pragma" and engine.pick_model("xgboost") == "xgboost"
     assert pragma_health(pragma)["end"] == "2026-08-25T12:59:00Z" and pragma_health(None) is None
+
+
+def test_pragma_bars_can_come_from_their_own_data_folder(tmp_path, monkeypatch):
+    """--pragma-data: PRAGMA reads its bars from there, XGBoost keeps data/processed."""
+    import sys
+    from live import server
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_load_pragma(data_dir, pred_dir, horizons, window):
+        seen["data"], seen["preds"] = data_dir, pred_dir
+        return {"pairs": ["USDJPY"], "scored": {}, "attrs": {}, "variant": "scratch", "horizon": 30}
+
+    def fake_engine(bank, pragma, model):
+        seen["engine"] = (pragma["pairs"], model)
+        raise Stop
+
+    old = tmp_path / "challenge1"
+    monkeypatch.setattr(server.pragma_replay, "available", lambda folder: True)
+    monkeypatch.setattr(server.pragma_replay, "load_pragma", fake_load_pragma)
+    monkeypatch.setattr(server, "load_bank", lambda retrain: {})
+    monkeypatch.setattr(server, "Engine", fake_engine)
+    monkeypatch.setattr(sys, "argv", ["server", "--pragma-data", str(old), "--pragma-dir", str(tmp_path)])
+    with pytest.raises(Stop):
+        server.main()
+    assert seen["data"] == old and seen["preds"] == tmp_path
+    assert seen["engine"] == (["USDJPY"], "xgboost")
+    assert server.DATA_DIR.name == "processed"  # XGBoost's data is unchanged
