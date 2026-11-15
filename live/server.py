@@ -59,7 +59,8 @@ STALE_SECONDS = 5 * 60               # no bar for this long -> no fresh data
 SIGNAL_HORIZON = 10                  # minutes: the Buy/Sell signal looks this far ahead (models.signal default)
 SIGNAL_THRESHOLD = 1.0               # expected move must beat this many predicted spreads to trade
 SIGNAL_EXIT = 0.5                    # ...and a call stays on until it drops below this many (less flicker)
-MAX_FILL_MIN = 5                     # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
+MAX_SCORING = 4                      # pairs scored at the same time at most (memory)
+MAX_FILL_MIN = 5                    # short Yahoo holes are filled flat (Yahoo skips quiet minutes)
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{pair}=X?interval=1m&range=5d"
 UA = "Mozilla/5.0 (fx-forecast-server)"
 
@@ -220,13 +221,42 @@ class Engine:
         self.bank = bank
         self.lock = threading.Lock()
         self.cache: Dict[str, tuple[float, dict]] = {}
+        # One scoring per pair at a time: concurrent requests for a pair wait for it and reuse
+        # the result instead of each redoing it (replay asks every second; duplicate work used
+        # to pile up until the process ran out of memory). At most MAX_SCORING pairs at once.
+        self.pair_locks = {p: threading.Lock() for p in bank["pairs"]}
+        self.scoring = threading.Semaphore(MAX_SCORING)
+
+    def _cached(self, pair: str, max_age: float) -> Optional[dict]:
+        with self.lock:
+            hit = self.cache.get(pair)
+        return hit[1] if hit and time.time() - hit[0] < max_age else None
 
     def scored(self, pair: str, max_age: float = CACHE_SECONDS) -> dict:
         """Live bars for a pair with model forecasts on every row (cached max_age seconds)."""
-        with self.lock:
-            hit = self.cache.get(pair)
-            if hit and time.time() - hit[0] < max_age:
-                return hit[1]
+        hit = self._cached(pair, max_age)
+        if hit is not None:
+            return hit
+        with self.pair_locks[pair]:
+            hit = self._cached(pair, max_age)  # another request may have just scored it
+            if hit is not None:
+                return hit
+            with self.scoring:
+                return self._score(pair)
+
+    def warm(self) -> None:
+        """Score every pair once in the background so the first page load / replay is quick."""
+        def run():
+            t0 = time.time()
+            for pair in self.bank["pairs"]:
+                try:
+                    self.scored(pair)
+                except Exception as e:
+                    print(f"[warm] {pair}: {e}", flush=True)
+            print(f"all pairs scored ({time.time() - t0:.0f}s)", flush=True)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _score(self, pair: str) -> dict:
         c = self.bank["consts"][pair]
         spot, last_price = fetch_spot(pair)
         bars = live_bars(spot, c)
@@ -287,7 +317,9 @@ class Engine:
         return float(np.clip(np.searchsorted(sorted_hist, x) / len(sorted_hist), 0.01, 0.99))
 
     def _get(self, pair: str, as_of: Optional[pd.Timestamp]) -> dict:
-        return self.scored(pair, REPLAY_CACHE_SECONDS if as_of is not None else CACHE_SECONDS)
+        # Replay re-uses whatever bars are cached (replay-range refreshes them when Replay is
+        # pressed), so the timeline stays put and nothing is rescored mid-replay.
+        return self.scored(pair, math.inf if as_of is not None else CACHE_SECONDS)
 
     @staticmethod
     def _row_at(ts: pd.Series, t: pd.Timestamp) -> int:
@@ -486,6 +518,7 @@ def main() -> int:
     p.add_argument("--retrain", action="store_true", help="retrain instead of using the cache")
     args = p.parse_args()
     engine = Engine(load_bank(args.retrain))
+    engine.warm()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(engine))
     print(f"serving XGBoost forecasts on http://localhost:{args.port}/api/snapshot", flush=True)
     server.serve_forever()

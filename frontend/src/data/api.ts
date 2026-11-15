@@ -20,8 +20,8 @@ const SOURCE: Source = (['yahoo', 'mock'] as const).find((s) => s === import.met
 export const USING_LIVE_DATA = SOURCE !== 'mock'
 export const USING_SAMPLE_DATA = !USING_LIVE_DATA
 
-async function fromServer<T>(path: string): Promise<T> {
-  const res = await fetch(path)
+async function fromServer<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, { signal })
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
   return res.json() as Promise<T>
 }
@@ -35,12 +35,14 @@ function fallback(err: unknown) {
 /** "&asOf=…" in replay, nothing when live (the server then uses the real now) */
 const at = (asOf: string, replay: boolean) => (replay ? `&asOf=${encodeURIComponent(asOf)}` : '')
 
-export async function getSnapshot(asOf: string, base: CurrencyCode, replay = false): Promise<Snapshot> {
+/** `signal` cancels the request when it's no longer wanted (replay moves on every second) */
+export async function getSnapshot(asOf: string, base: CurrencyCode, replay = false, signal?: AbortSignal): Promise<Snapshot> {
   if (SOURCE === 'mock') return mockSnapshot(asOf, base)
   if (SOURCE === 'model') {
     try {
-      return await fromServer<Snapshot>(`/api/snapshot?base=${encodeURIComponent(base)}${at(asOf, replay)}`)
+      return await fromServer<Snapshot>(`/api/snapshot?base=${encodeURIComponent(base)}${at(asOf, replay)}`, signal)
     } catch (err) {
+      if (signal?.aborted) throw err // superseded, not a server failure: don't fall back
       fallback(err)
     }
   }
