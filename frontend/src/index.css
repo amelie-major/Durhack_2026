@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------
+   Design tokens — "night side of the Earth from orbit"
+   Use as Tailwind utilities: bg-space, text-ink-muted, text-calm, etc.
+   `static` makes Tailwind emit every token, so JS (the globe) can read them.
+   ------------------------------------------------------------------ */
+@theme static {
+  /* Surfaces */
+  --color-space: #050811;          /* page background */
+  --color-panel: rgb(13 19 36 / 0.72); /* frosted glass panels */
+  --color-panel-border: rgb(148 163 184 / 0.14);
+
+  /* Text */
+  --color-ink: #e6ebf5;
+  --color-ink-muted: #8b96ad;
+  --color-ink-faint: #56607a;
+
+  /* Interactive accent */
+  --color-accent: #7c9cff;
+  --color-accent-bright: #b4c6ff; /* highlighted countries on the globe */
+
+  /* Storm scale — always pair with an icon + word (colour-blind safe) */
+  --color-calm: #2dd4bf;       /* teal  + sun        */
+  --color-unsettled: #fbbf24;  /* amber + cloud      */
+  --color-storm: #f43f8e;      /* magenta + lightning */
+  --color-nodata: #334155;
+  --color-buy: #22c55e;        /* green: model says buy  */
+  --color-sell: #ef4444;       /* red:   model says sell */
+  --color-hold: #94a3b8;       /* grey:  neither         */
+  --color-extreme: #ff2e3b;    /* BRIGHT red + warning triangle: forecast ≥ 1.5× normal */
+
+  /* Pro charts: two data series (validated: CVD-safe on the dark panel). Forecast is also dashed. */
+  --color-series-forecast: #6b8cf5;
+  --color-series-actual: #c8783a;
+
+  /* Type */
+  --font-display: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /* Rates ticker: the list is drawn twice and slides left by half its width, so it loops seamlessly */
+  --animate-ticker: ticker 45s linear infinite;
+  /* Extreme warning: a slow red glow pulse */
+  --animate-alarm: alarm 1.6s ease-in-out infinite;
+  @keyframes alarm {
+    0%, 100% { box-shadow: 0 0 0 0 rgb(255 46 59 / 0.55); }
+    50% { box-shadow: 0 0 0 6px rgb(255 46 59 / 0); }
+  }
+  /* Tolerance switch: a brief accent flash on whatever just changed */
+  --animate-flash: flash 0.9s ease-out;
+  @keyframes flash {
+    from { background-color: rgb(124 156 255 / 0.28); }
+    to { background-color: transparent; }
+  }
+  @keyframes ticker {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-space text-ink font-sans antialiased;
+    overflow: hidden;
+  }
+}
+
+/* Frosted-glass panel used everywhere over the globe */
+@utility glass {
+  background: var(--color-panel);
+  border: 1px solid var(--color-panel-border);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-radius: 1rem;
+  box-shadow: 0 10px 40px rgb(0 0 0 / 0.35);
+}
+
+/* Numbers that don't jitter while ticking */
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Globe hover tooltip (float-tooltip injects its own style later, so `div.` wins on specificity) */
+div.float-tooltip-kap {
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  font: inherit;
+  color: inherit;
+}
+.globe-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-panel-border);
+  border-radius: 0.75rem;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--color-ink);
+}
+.globe-tip span {
+  color: var(--color-ink-muted);
+  font-size: 12px;
+}
+/* Pro chart: soft glow on the two main lines */
+.chart-glow-actual .recharts-area-curve {
+  filter: drop-shadow(0 0 4px rgb(200 120 58 / 0.65));
+}
+.chart-glow-forecast .recharts-line-curve {
+  filter: drop-shadow(0 0 3px rgb(107 140 245 / 0.6));
+}
+/* Chart tooltips sit over lines, so they need a solid background */
+.globe-tip.chart-tip {
+  background: rgb(9 13 26 / 0.96);
+  border-color: rgb(148 163 184 / 0.28);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);
+}

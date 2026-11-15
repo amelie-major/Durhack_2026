@@ -1,0 +1,111 @@
+/**
+ * Layout: the globe fills the screen; small panels sit at the edges so it stays visible.
+ * Pro mode adds a slim history panel on the right (the globe stays visible on the left/centre).
+ * Bottom-centre: replay controls (play back through the last day of data).
+ */
+import { useEffect } from 'react'
+import FxGlobe from './components/globe/FxGlobe'
+import ConvertCard from './components/convert/ConvertCard'
+import RatesTicker from './components/layout/RatesTicker'
+import StormLegend from './components/layout/StormLegend'
+import ProPanel from './components/pro/ProPanel'
+import ExtremeAlert from './components/layout/ExtremeAlert'
+import ReplayBar from './components/layout/ReplayBar'
+import { getSnapshot } from './data/api'
+import { useAppStore } from './store/useAppStore'
+
+/** Load data for the current simulated "now" whenever it (or the From currency) changes */
+function useSnapshotLoader() {
+  const asOf = useAppStore((s) => s.asOf)
+  const base = useAppStore((s) => s.base)
+  const replaying = useAppStore((s) => s.replay !== null)
+  const setSnapshot = useAppStore((s) => s.setSnapshot)
+  useEffect(() => {
+    let cancelled = false
+    getSnapshot(asOf, base, replaying)
+      .then((snap) => {
+        if (!cancelled) setSnapshot(snap)
+      })
+      .catch((err: unknown) => console.error('[data] could not load snapshot', err))
+    return () => {
+      cancelled = true
+    }
+  }, [asOf, base, replaying, setSnapshot])
+}
+
+/** Live clock: every UPDATE_EVERY_MS the simulated "now" moves on 1 minute and everything refreshes */
+function useLiveClock() {
+  const live = useAppStore((s) => s.live)
+  useEffect(() => {
+    if (!live) return
+    const id = window.setInterval(() => {
+      const { nextUpdateAt, tick } = useAppStore.getState()
+      if (Date.now() >= nextUpdateAt) tick()
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [live])
+}
+
+/** Replay clock: once a second the replayed moment moves on by the chosen speed */
+function useReplayClock() {
+  const playing = useAppStore((s) => s.replay?.playing ?? false)
+  useEffect(() => {
+    if (!playing) return
+    const id = window.setInterval(() => useAppStore.getState().replayTick(), 1000)
+    return () => window.clearInterval(id)
+  }, [playing])
+}
+
+export default function App() {
+  useSnapshotLoader()
+  useLiveClock()
+  useReplayClock()
+  const mode = useAppStore((s) => s.mode)
+
+  return (
+    <div className="relative h-full w-full">
+      {/* Globe layer (full screen, behind everything) */}
+      <FxGlobe />
+
+      {/* Top: thin rates "conveyor belt" with a small brand */}
+      <header className="absolute top-3 left-3 right-3">
+        <RatesTicker />
+      </header>
+
+      {/* Bright red warning when any pair is "Extreme" (≥ 1.5× its normal move) */}
+      <div
+        className={`pointer-events-none absolute top-15 left-3 flex justify-center [&>*]:pointer-events-auto ${
+          mode === 'pro' ? 'right-[400px]' : 'right-3'
+        }`}
+      >
+        <ExtremeAlert />
+      </div>
+
+      {/* Bottom-left: convert card */}
+      <div className="absolute bottom-3 left-3">
+        <ConvertCard />
+      </div>
+
+      {/* Bottom-centre: replay the last day (kept clear of the Pro panel) */}
+      <div
+        className={`pointer-events-none absolute bottom-3 left-3 flex justify-center [&>*]:pointer-events-auto ${
+          mode === 'pro' ? 'right-[400px]' : 'right-3'
+        }`}
+      >
+        <ReplayBar />
+      </div>
+
+      {mode === 'pro' ? (
+        /* Right: Pro panel (history + detail), between the top bar and the bottom edge */
+        <div className="absolute top-15 right-3 bottom-3 flex flex-col">
+          <ProPanel />
+        </div>
+      ) : (
+        /* Bottom-right: volatility key */
+        <div className="absolute bottom-3 right-3 hidden sm:block">
+          <StormLegend />
+        </div>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,108 @@
+/**
+ * Shared data contract between the model team and the UI.
+ * PROPOSAL v2 (15 Nov) — agree with the team, then change it in ONE place (here).
+ * v2 adds `base` and `status` to PairSnapshot. See "DurHack decisions & to-do".
+ */
+
+export type CurrencyCode = string // e.g. "USD", "JPY"
+
+export interface PairForecast {
+  /** Minutes ahead for each forecast point, e.g. [5, 10, ..., 30] */
+  horizonsMin: number[]
+  /** Forecast realised volatility in bp at each horizon (same length as horizonsMin) */
+  vol: number[]
+  /** Forecast spread in basis points at each horizon */
+  spreadBps: number[]
+  /** Optional uncertainty band */
+  volLow?: number[]
+  volHigh?: number[]
+}
+
+/** Data state of one pair at the simulated "now". See the "Data gaps" table in the decisions doc. */
+export type PairStatus = 'live' | 'rollover' | 'stale' | 'no_data' | 'thin'
+
+export interface PairSnapshot {
+  pair: string // market convention, e.g. "USDJPY"
+  base: CurrencyCode // "USD"  (v2)
+  quote: CurrencyCode // "JPY"
+  bid: number
+  ask: number
+  mid: number
+  spreadBps: number
+  realizedVol30m: number
+  forecast: PairForecast
+  /** How unusual forecast vol is vs this pair's own history, 0–1. Drives globe colour. */
+  percentile: number
+  /**
+   * (v3, optional) This pair's NORMAL 30-min vol in bp: the median over recent history.
+   * Forecast ≥ 1.5 × this → "Extreme" (bright red warning). Without it, no Extreme flag.
+   */
+  volNormal30m?: number
+  status: PairStatus // (v2)
+  /** (v4, optional) The model's Buy / Sell / Hold signal. Missing when there is no direction model. */
+  signal?: PairSignal | null
+}
+
+export type SignalAction = 'buy' | 'sell' | 'hold'
+
+/** Buy/Sell signal for a pair (models/signal.py). BUY EURUSD = buy EUR, sell USD. */
+export interface PairSignal {
+  action: SignalAction
+  /** 1 = definitely buy, 0 = definitely sell, 0.5 = no view */
+  score: number
+  /** Model's probability that the rate is higher after `horizonMin` minutes */
+  pUp: number
+  /** Signed expected move in bp (+ = up) */
+  expectedMoveBps: number
+  /** The move it has to beat: threshold × forecast spread, in bp */
+  hurdleBps: number
+  horizonMin: number
+}
+
+export interface Snapshot {
+  asOf: string // ISO timestamp — the (simulated) "now"
+  base: CurrencyCode
+  lastUpdated: string // ISO timestamp of the newest data used
+  pairs: PairSnapshot[]
+}
+
+/* ---------- v3 (15 Nov, PROPOSAL): past history for the Pro view. Additive only. ---------- */
+
+/** One time step of a pair's history (every `stepMin` minutes) */
+export interface HistoryPoint {
+  t: string // ISO timestamp
+  mid: number | null
+  spreadBps: number | null
+  /** Vol the model forecast AT time t for the next `horizonMin` minutes (bp) */
+  volForecast: number | null
+  volForecastLow?: number | null
+  volForecastHigh?: number | null
+  /** Vol that actually happened over t … t+horizonMin (bp). null until that window has passed */
+  volActual: number | null
+  /** Forecast vol percentile vs the pair's own history, 0–1 */
+  percentile: number | null
+  status: PairStatus
+}
+
+export interface PairHistory {
+  pair: string
+  base: CurrencyCode
+  quote: CurrencyCode
+  stepMin: number // e.g. 5
+  horizonMin: number // e.g. 30
+  points: HistoryPoint[] // oldest first, last point = asOf
+}
+
+/** Replay: the stretch of past data that can be played back (the last day we have bars for) */
+export interface ReplayRange {
+  start: string // ISO timestamp
+  end: string // ISO timestamp — the newest bar every pair has
+  stepMin: number // smallest step, 1 = one-minute bars
+}
+
+/** UI-side derived types */
+export type StormLevel = 'calm' | 'unsettled' | 'storm' | 'extreme' | 'nodata' // 'extreme' added in v3
+export type Tolerance = 'relaxed' | 'balanced' | 'cautious'
+export type ViewMode = 'simple' | 'pro'
+/** What the globe colours show */
+export type MapLayer = 'volatility' | 'signal'
