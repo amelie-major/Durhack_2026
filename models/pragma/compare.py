@@ -75,7 +75,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"no PRAGMA predictions found ({pattern}); showing XGBoost only")
     for path in paths:
         name = os.path.basename(path).rsplit(".", 1)[0].split("_")[-1]
-        predictions[f"pragma {name}"] = load_pragma_predictions(path, test_df)
+        label = "xgboost+pragma" if name.startswith("hybrid") else f"pragma {name}"
+        predictions[label] = load_pragma_predictions(path, test_df)
 
     print_table(test_df, predictions)
     return 0

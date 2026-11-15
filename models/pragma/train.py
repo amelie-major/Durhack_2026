@@ -32,9 +32,9 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from loader import load_processed
-from models.xgboost_model import MAX_HORIZON
+from models.xgboost_model import MAX_HORIZON, VOL_TENOR
 
-from .config import PRESETS, RUN_DIR, Config
+from .config import PRESETS, RUN_DIR, Config, with_current_finetune_settings
 from .data import Bars, apply_mask, fit_tokenizer, make_mask, split_rows
 from .model import Pragma
 from .tokenizer import EVENT_KEYS, Tokenizer
@@ -44,7 +44,9 @@ from .tokenizer import EVENT_KEYS, Tokenizer
 # Shared helpers
 # ==========================================================================
 
-def pick_device() -> torch.device:
+def pick_device(name: str = "auto") -> torch.device:
+    if name != "auto":
+        return torch.device(name)
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True  # faster float32 maths on newer GPUs
         torch.backends.cudnn.allow_tf32 = True
@@ -115,6 +117,24 @@ def backward_and_step(loss: torch.Tensor, model: torch.nn.Module,
     return grad_norm
 
 
+def log_progress(step: int, total: int, every: int, recent: list, lr: float,
+                 grad_norm: float, started: float, label: str) -> None:
+    """One plain-text line every `every` steps (readable in slurm logs, unlike the bar)."""
+    if every and (step + 1) % every == 0:
+        window = recent[-every:]
+        tqdm.write(f"  [{step + 1:>6}/{total}] {label} {np.mean(window):.4f}  "
+                   f"lr {lr:.2e}  grad norm {grad_norm:.2f}  {time.time() - started:.0f}s")
+
+
+def set_dropout(model: torch.nn.Module, p: float) -> None:
+    """Change every dropout rate in the model (the layers store it in two ways)."""
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.p = p
+        if isinstance(getattr(module, "dropout", None), float):
+            module.dropout = p
+
+
 def make_optimizer(model: Pragma, cfg: Config, lr: float) -> torch.optim.Optimizer:
     return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.weight_decay)
 
@@ -126,9 +146,11 @@ def save_checkpoint(path: str, model: Pragma, tokenizer: Tokenizer, cfg: Config)
 
 
 def load_checkpoint(path: str, device: torch.device):
-    """Returns (model, tokenizer, cfg) exactly as they were when saved."""
+    """Returns (model, tokenizer, cfg): the saved model, with today's fine-tuning settings."""
     state = torch.load(path, map_location=device, weights_only=True)
-    cfg = Config(**state["config"])
+    known = Config.__dataclass_fields__
+    cfg = with_current_finetune_settings(
+        Config(**{k: v for k, v in state["config"].items() if k in known}))
     tokenizer = Tokenizer.from_dict(state["tokenizer"])
     model = Pragma(cfg, tokenizer).to(device)
     model.load_state_dict(state["model"])
@@ -198,7 +220,9 @@ def pretrain(args) -> None:
     cfg = PRESETS[args.preset]
     if args.steps:
         cfg = replace(cfg, pretrain_steps=args.steps)
-    device = pick_device()
+    if args.batch_size:
+        cfg = replace(cfg, batch_size=args.batch_size)
+    device = pick_device(args.device)
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
 
@@ -244,6 +268,8 @@ def pretrain(args) -> None:
         grad_norm = backward_and_step(loss, model, optimizer, scaler)
         bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
                         gnorm=f"{grad_norm:.2f}", refresh=False)
+        log_progress(step, cfg.pretrain_steps, args.log_every, recent, group["lr"], grad_norm,
+                     started, "train loss")
         if args.debug and step < 3:
             tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
                        f"{grad_norm:.3f}  batch " + ", ".join(
@@ -265,7 +291,7 @@ def pretrain(args) -> None:
 # ==========================================================================
 
 def finetune(args) -> None:
-    device = pick_device()
+    device = pick_device(args.device)
     series, _ = load_processed(args.data)
 
     if args.from_scratch:  # same architecture, random weights: does pre-training help?
@@ -297,7 +323,23 @@ def finetune(args) -> None:
     def predict(ends: np.ndarray) -> np.ndarray:
         return run_in_chunks(model, bars, ends, cfg, device, model) * y_std + y_mean
 
-    optimizer = make_optimizer(model, cfg, cfg.finetune_lr)
+    # Gentle fine-tune (the full-size model overfits the small target sets):
+    # more dropout; the new head first learns alone on frozen layers (LP-FT), then
+    # the pre-trained layers move with a small learning rate, the head with a larger one.
+    set_dropout(model, cfg.finetune_dropout)
+    backbone = [p for n, p in model.named_parameters() if not n.startswith("regressor")]
+    head = list(model.regressor.parameters())
+    if args.from_scratch:  # random weights: no head-only phase, one learning rate
+        freeze, backbone_lr, head_lr = 0, cfg.finetune_scratch_lr, cfg.finetune_scratch_lr
+    else:
+        freeze, backbone_lr, head_lr = cfg.finetune_freeze_steps, cfg.finetune_lr, cfg.finetune_head_lr
+    optimizer = torch.optim.AdamW(
+        [{"params": backbone, "peak": backbone_lr, "start": freeze},
+         {"params": head, "peak": head_lr, "start": 0}],
+        lr=backbone_lr, weight_decay=cfg.finetune_weight_decay)
+    print(f"fine-tune: backbone lr {backbone_lr:g} (after {freeze} head-only steps)  "
+          f"head lr {head_lr:g}  dropout {cfg.finetune_dropout}  "
+          f"weight decay {cfg.finetune_weight_decay}  eval every {cfg.finetune_eval_every}")
     scaler = make_scaler(device)
     best_rmse, best_state, evals_since_best = float("inf"), None, 0
     if args.debug:
@@ -305,9 +347,15 @@ def finetune(args) -> None:
     started, recent = time.time(), []
     bar = tqdm(range(cfg.finetune_steps), desc="finetune", unit="step", dynamic_ncols=True)
     for step in bar:
-        model.train()
+        frozen = step < freeze
+        for p in backbone:
+            p.requires_grad_(not frozen)
+        model.train(not frozen)  # head-only phase: embeddings without dropout
         for group in optimizer.param_groups:
-            group["lr"] = lr_at(step, cfg.finetune_steps, cfg.finetune_lr, cfg.warmup_steps)
+            s0 = group["start"]
+            group["lr"] = lr_at(step - s0, cfg.finetune_steps - s0, group["peak"],
+                                cfg.finetune_warmup_steps) if step >= s0 else 0.0
+        group = optimizer.param_groups[-1]  # head: shown in the progress line
         picks = rng.choice(len(train_ends), cfg.batch_size)
         batch = bars.batch(train_ends[picks], cfg.context, device)
         with autocast(device):
@@ -316,11 +364,13 @@ def finetune(args) -> None:
         grad_norm = backward_and_step(loss, model, optimizer, scaler)
         bar.set_postfix(loss=f"{recent[-1]:.3f}", lr=f"{group['lr']:.1e}",
                         gnorm=f"{grad_norm:.2f}", refresh=False)
+        log_progress(step, cfg.finetune_steps, args.log_every, recent, group["lr"], grad_norm,
+                     started, "train mse (standardised)")
         if args.debug and step < 3:
             tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
                        f"{grad_norm:.3f}")
 
-        if (step + 1) % cfg.eval_every == 0 or step + 1 == cfg.finetune_steps:
+        if (step + 1) % cfg.finetune_eval_every == 0 or step + 1 == cfg.finetune_steps:
             val_rmse = rmse(val_y, predict(val_ends))
             train_rmse = y_std * math.sqrt(np.mean(recent))
             tqdm.write(f"step {step + 1:>6}/{cfg.finetune_steps}  train RMSE {train_rmse:.4f}  "
@@ -344,6 +394,15 @@ def finetune(args) -> None:
           f"test RMSE {rmse(rows['test']['y'].to_numpy(), test_pred):.4f}")
     print("saved", save_predictions(rows["test"], test_pred, args.target, args.horizon, name))
 
+    # The fine-tuned model itself, so predictions can be made later (on CPU too).
+    model_path = os.path.join(RUN_DIR, f"{args.target}_h{args.horizon}_{name}.pt")
+    os.makedirs(RUN_DIR, exist_ok=True)
+    torch.save({"config": cfg.to_dict(), "tokenizer": tokenizer.to_dict(),
+                "model": model.state_dict(),
+                "head": {"target": args.target, "horizon": args.horizon,
+                         "y_mean": y_mean, "y_std": y_std}}, model_path)
+    print("saved", model_path, " (use: python -m models.pragma.train predict --model ...)")
+
 
 # ==========================================================================
 # Linear probe on frozen embeddings (the paper's main evaluation)
@@ -353,7 +412,7 @@ def probe(args) -> None:
     from sklearn.linear_model import Ridge
     from sklearn.preprocessing import StandardScaler
 
-    device = pick_device()
+    device = pick_device(args.device)
     series, _ = load_processed(args.data)
     model, tokenizer, cfg = load_checkpoint(args.checkpoint, device)
     rng = np.random.default_rng(cfg.seed)
@@ -368,21 +427,70 @@ def probe(args) -> None:
         return run_in_chunks(model, bars, part["g"].to_numpy(), cfg, device, model.embedding)
 
     print(f"{describe(device)}  embedding train={len(train):,} val={len(val):,} test={len(test):,}")
-    scaler = StandardScaler().fit(embed(train))
-    x_train, x_val = scaler.transform(embed(train)), scaler.transform(embed(val))
+    embedded_train = embed(train)
+    scaler = StandardScaler().fit(embedded_train)
+    x_train, x_val = scaler.transform(embedded_train), scaler.transform(embed(val))
 
     # Choose the ridge strength on validation, then predict the test set.
-    best_rmse, best_model = float("inf"), None
-    for alpha in (1.0, 10.0, 100.0, 1000.0, 10000.0):
+    best_rmse, best_model, best_alpha = float("inf"), None, None
+    alphas = (1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6, 1e7)
+    for alpha in alphas:
         linear = Ridge(alpha=alpha).fit(x_train, train["y"].to_numpy())
         val_rmse = rmse(val["y"].to_numpy(), linear.predict(x_val))
         print(f"  ridge alpha={alpha:<8g} val RMSE {val_rmse:.4f}")
         if val_rmse < best_rmse:
-            best_rmse, best_model = val_rmse, linear
+            best_rmse, best_model, best_alpha = val_rmse, linear, alpha
+    if best_alpha in (alphas[0], alphas[-1]):
+        print(f"  note: best alpha {best_alpha:g} is at the edge of the grid; widen it")
 
     test_pred = best_model.predict(scaler.transform(embed(test)))
     print(f"test RMSE {rmse(test['y'].to_numpy(), test_pred):.4f}")
     print("saved", save_predictions(test, test_pred, args.target, args.horizon, "probe"))
+
+
+# ==========================================================================
+# Predictions from a fine-tuned model (works on CPU)
+# ==========================================================================
+
+def predict_command(args) -> None:
+    """Predict the target for the latest bar(s) of every instrument in --data."""
+    device = pick_device(args.device)
+    head = torch.load(args.model, map_location="cpu", weights_only=True).get("head")
+    if head is None:
+        raise SystemExit(f"{args.model} is a pre-training checkpoint, not a fine-tuned model; "
+                         "use one written by `finetune` (e.g. runs/pragma/vol_h30_finetune.pt)")
+    model, tokenizer, cfg = load_checkpoint(args.model, device)
+    series, _ = load_processed(args.data)
+    bars = Bars(series, tokenizer)
+
+    parts = []
+    for instrument_id, df in series.items():
+        if head["target"] == "vol" and df.attrs["tenor"] != VOL_TENOR:
+            continue  # the vol model was trained on one tenor per pair
+        n = len(df)
+        keep = n if args.last == 0 else min(args.last, n)
+        parts.append(pd.DataFrame({
+            "instrument_id": instrument_id, "pair": df.attrs["pair"],
+            "tenor": df.attrs["tenor"],
+            "timestamp": df["timestamp"].iloc[n - keep:].to_numpy(),
+            "g": bars.offset[instrument_id] + np.arange(n - keep, n),
+        }))
+    out = pd.concat(parts, ignore_index=True)
+
+    z = run_in_chunks(model, bars, out["g"].to_numpy(), cfg, device, model)
+    out = out.drop(columns="g")
+    out["pred_log_bp"] = z * head["y_std"] + head["y_mean"]
+    out["pred_bp"] = np.exp(out["pred_log_bp"])  # back from the log scale the model predicts
+    out.insert(0, "target", f"{head['target']}_h{head['horizon']}")
+
+    if args.out.endswith(".csv"):
+        out.to_csv(args.out, index=False)
+    else:
+        out.to_parquet(args.out, index=False)
+    with pd.option_context("display.width", 120, "display.max_columns", 10):
+        print(out.tail(10).to_string(index=False))
+    print(f"\n{len(out):,} predictions ({head['target']}, next {head['horizon']} min) "
+          f"-> {args.out}")
 
 
 # ==========================================================================
@@ -397,6 +505,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def common(sub, with_target: bool):
         sub.add_argument("--data", default="data/processed", help="output dir of loader.py")
         sub.add_argument("--checkpoint", default=default_checkpoint)
+        sub.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
+                         help="auto picks cuda if available, else cpu")
         if with_target:
             sub.add_argument("--target", choices=["vol", "spread"], default="vol")
             sub.add_argument("--horizon", type=int, default=30, help="minutes ahead to predict")
@@ -405,6 +515,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     common(sub, with_target=False)
     sub.add_argument("--preset", choices=sorted(PRESETS), default="gpu")
     sub.add_argument("--steps", type=int, help="override the preset's number of steps")
+    sub.add_argument("--batch-size", type=int, help="override the preset's batch size "
+                                                    "(lower it if the GPU runs out of memory)")
     sub.set_defaults(run=pretrain)
 
     sub = commands.add_parser("finetune", help="train on a target, from the checkpoint")
@@ -420,7 +532,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     common(sub, with_target=True)
     sub.set_defaults(run=probe)
 
+    sub = commands.add_parser("predict", help="predict with a fine-tuned model (CPU is fine)")
+    sub.add_argument("--model", required=True,
+                     help="a fine-tuned model, e.g. runs/pragma/vol_h30_finetune.pt")
+    sub.add_argument("--data", default="data/processed", help="output dir of loader.py")
+    sub.add_argument("--last", type=int, default=1,
+                     help="predict the last N bars of each instrument (0 = every bar)")
+    sub.add_argument("--out", default=os.path.join(RUN_DIR, "predictions.csv"),
+                     help=".csv or .parquet")
+    sub.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    sub.set_defaults(run=predict_command)
+
     for name in ("pretrain", "finetune"):
+        commands.choices[name].add_argument(
+            "--log-every", type=int, default=100,
+            help="print a progress line every N steps (0 to turn off)")
         commands.choices[name].add_argument(
             "--debug", action="store_true",
             help="anomaly detection + print shapes/grad norms for the first steps")

@@ -132,3 +132,48 @@ python -m models.pragma.compare        --target vol     # table: baseline / XGBo
 Repeat the last four with `--target spread`. Use `--preset smoke` on `pretrain` for a few-minute CPU run that only checks the pipeline works; its scores are not meaningful. `runs/` is gitignored.
 
 On NCC, `sbatch scripts/ncc_pragma.sh` runs all of the above for both targets in one job (copy `data/processed/` over first; see the top of the script).
+
+## Hybrid model: XGBoost + PRAGMA embeddings
+
+`models/pragma/hybrid.py` gives XGBoost its usual features plus 32 PCA components of the frozen PRAGMA embedding of each row's window. It is our best spread model (test RMSE in log bp, h=30, lower is better):
+
+| target | hybrid | XGBoost alone | PRAGMA fine-tuned |
+|---|---|---|---|
+| spread | **0.1387** | 0.1403 | 0.1663 |
+| vol | 0.2853 | **0.2840** | 0.2978 |
+
+### Train and export (NCC, GPU)
+
+```bash
+CHECKPOINT=runs/pragma/pretrain_large.pt sbatch scripts/ncc_hybrid.sh
+```
+
+For each target this writes the test predictions (`runs/pragma/<target>_h30_hybrid.parquet`, read by `compare.py`) and a self-contained model folder `runs/pragma/hybrid_<target>_h30/`:
+
+| file | contents |
+|---|---|
+| `pragma.pt` | copy of the pre-trained PRAGMA checkpoint (82 MB) |
+| `pca.npz` | PCA `mean` and `components` as plain arrays |
+| `xgb.json` | the XGBoost model |
+| `meta.json` | target, horizon, feature and embedding column names, pair categories, test scores |
+
+The trained folders are committed on the `models/hybrid-h30` branch under `exported_models/` (`git checkout models/hybrid-h30`).
+
+### Predict (any laptop, CPU is fine)
+
+After the data loader has built `data/processed/`:
+
+```bash
+python -m models.pragma.hybrid_predict --model exported_models/hybrid_spread_h30 \
+    --data data/processed --last 1 --out spread_now.csv --device cpu
+```
+
+`--last N` predicts at each instrument's last N bars (vol uses only the 1M tenor, as in training). The output (`.csv` or `.parquet`) has `target, instrument_id, pair, tenor, timestamp, pred_log_bp, pred_bp`; `pred_bp` is the forecast for the next 30 minutes in bp (spread: mean spread; vol: realised volatility). Use `--model exported_models/hybrid_vol_h30` for volatility. Progress is printed with timings; a run takes about 10 s on a laptop.
+
+Predictions are only as fresh as `data/processed/`: for live forecasts, re-run the data loader on the newest bars first.
+
+**macOS: if it hangs** with no new progress line for a minute, torch and XGBoost are probably clashing over OpenMP (their parallel-processing library). Run with:
+
+```bash
+OMP_NUM_THREADS=1 KMP_DUPLICATE_LIB_OK=TRUE python -m models.pragma.hybrid_predict ...
+```
