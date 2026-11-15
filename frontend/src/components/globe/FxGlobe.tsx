@@ -15,6 +15,7 @@
  * - Map layer toggle: "Volatility" (above) or "Buy / Sell": zones and lines go green (buy), red (sell)
  *   or grey (hold) from the model's signal READ FROM YOUR "From" CURRENCY (green Japan = buy JPY with
  *   your USD), with a pulsing ring on each country where a buy/sell is on.
+ * - A pair picked in the Extreme alert list is drawn bright red (both countries, its line, rings).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Globe, { type GlobeMethods } from 'react-globe.gl'
@@ -211,8 +212,39 @@ export default function FxGlobe() {
     [levelColor, zoneLevels, mapLayer, base, colors, fromSignalColor, snapshot, alertZones],
   )
 
+  // Only rebuild arc objects when the set of currency pairs actually changes
+  const pairSignature = useMemo(
+    () =>
+      (snapshot?.pairs ?? [])
+        .map((p) => `${p.base}-${p.quote}`)
+        .sort()
+        .join('|'),
+    [snapshot?.pairs],
+  )
+
+  const arcs = useMemo<StableArc[]>(() => {
+    return (snapshot?.pairs ?? []).flatMap((pair) => {
+      const a = ZONE_BY_CODE.get(pair.base)
+      const b = ZONE_BY_CODE.get(pair.quote)
+      if (!a || !b) return []
+      return [
+        {
+          id: `${pair.base}-${pair.quote}`,
+          base: pair.base,
+          quote: pair.quote,
+          startLat: a.anchor.lat,
+          startLng: a.anchor.lng,
+          endLat: b.anchor.lat,
+          endLng: b.anchor.lng,
+        },
+      ]
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairSignature])
+
   // Which lines to draw, each with the currency held on that leg (so its Buy / Sell colour reads from your side):
-  // your route, the route to the hovered country, and (Buy / Sell) your currency's active buy/sell pairs
+  // your route, the route to the hovered country, the pair picked in the alert list, and
+  // (Buy / Sell) your currency's active buy/sell pairs
   const hoveredZone = hoveredCode ? (ZONE_BY_COUNTRY.get(hoveredCode)?.code ?? null) : null
   const arcFrom = useMemo(() => {
     const m = new Map<string, CurrencyCode>()
@@ -233,73 +265,24 @@ export default function FxGlobe() {
   }, [snapshot, base, quote, hoveredZone, mapLayer, alertArcId])
   const visibleKey = [...arcFrom.keys()].sort().join('|')
 
-  // Keep latest live data & helpers in a ref so arc/ring accessors read fresh values
-  // without forcing Three.js to recreate meshes or reset animation clocks on each timeframe tick
-  const liveRef = useRef({
-    snapshot,
-    mapLayer,
-    tolerance,
-    colors,
-    levelColor,
-    signalColor,
-    base,
-    arcFrom,
-    fromSignalColor,
-    alertZones,
-    alertArcId,
-  })
-  liveRef.current = {
-    snapshot,
-    mapLayer,
-    tolerance,
-    colors,
-    levelColor,
-    signalColor,
-    base,
-    arcFrom,
-    fromSignalColor,
-    alertZones,
-    alertArcId,
-  }
-
-  // Only rebuild arc objects when the set of currency pairs actually changes
-  const pairSignature = useMemo(
-    () =>
-      (snapshot?.pairs ?? [])
-        .map((p) => `${p.base}-${p.quote}`)
-        .sort()
-        .join('|'),
-    [snapshot?.pairs],
-  )
-
-  const arcs = useMemo<StableArc[]>(() => {
-    return (liveRef.current.snapshot?.pairs ?? []).flatMap((pair) => {
-      const a = ZONE_BY_CODE.get(pair.base)
-      const b = ZONE_BY_CODE.get(pair.quote)
-      if (!a || !b) return []
-      return [
-        {
-          id: `${pair.base}-${pair.quote}`,
-          base: pair.base,
-          quote: pair.quote,
-          startLat: a.anchor.lat,
-          startLng: a.anchor.lng,
-          endLat: b.anchor.lat,
-          endLng: b.anchor.lng,
-        },
-      ]
-    })
-  }, [pairSignature])
-
   // Same arc objects as above (so lines don't restart their animation), only the ones worth showing
   const visibleArcs = useMemo(
     () => arcs.filter((a) => visibleKey.split('|').includes(a.id)),
     [arcs, visibleKey],
   )
 
-  const getPairForArc = useCallback((arc: StableArc) => {
-    return liveRef.current.snapshot?.pairs.find((p) => p.base === arc.base && p.quote === arc.quote)
-  }, [])
+  /** Arcs on your route (drawn bolder) */
+  const routeArcIds = useMemo(
+    () => new Set(routeLegs(snapshot, base, quote).map((l) => `${l.pair.base}-${l.pair.quote}`)),
+    [snapshot, base, quote],
+  )
+
+  const getPairForArc = useCallback(
+    (arc: StableArc) => {
+      return snapshot?.pairs.find((p) => p.base === arc.base && p.quote === arc.quote)
+    },
+    [snapshot?.pairs],
+  )
 
   // 1. Load country shapes once (local file, so venue wifi can't break it)
   useEffect(() => {
@@ -341,7 +324,7 @@ export default function FxGlobe() {
 
   const rings = useMemo<StableRing[]>(() => {
     if (!activeRingKeys) return []
-    return activeRingKeys.split('|').flatMap((key) => {
+    return activeRingKeys.split('|').flatMap<StableRing>((key) => {
       if (key.startsWith('zone:')) {
         const code = key.slice(5)
         const z = ZONE_BY_CODE.get(code)
@@ -359,57 +342,56 @@ export default function FxGlobe() {
     })
   }, [activeRingKeys])
 
-  const ringColor = useCallback((obj: object) => {
-    const ring = obj as StableRing
-    return (t: number) => {
-      const { colors: c, snapshot: snap, signalColor: sigColor, mapLayer: layer, base: from, fromSignalColor: fromColor } = liveRef.current
-      let baseColor = c.extreme
-      const picked = liveRef.current.alertZones
-      if (ring.zoneCode && layer === 'signal' && !picked.has(ring.zoneCode)) baseColor = fromColor(findPair(snap, from, ring.zoneCode), from)
-      if (ring.pairId) {
-        const [b, q] = ring.pairId.split('-')
-        const pair = snap?.pairs.find((p) => p.base === b && p.quote === q)
-        baseColor = sigColor(pair)
+  const ringColor = useCallback(
+    (obj: object) => {
+      const ring = obj as StableRing
+      return (t: number) => {
+        let baseColor = colors.extreme
+        if (ring.zoneCode && mapLayer === 'signal' && !alertZones.has(ring.zoneCode)) {
+          baseColor = fromSignalColor(findPair(snapshot, base, ring.zoneCode), base)
+        }
+        if (ring.pairId) {
+          const [b, q] = ring.pairId.split('-')
+          const pair = snapshot?.pairs.find((p) => p.base === b && p.quote === q)
+          baseColor = signalColor(pair)
+        }
+        return withAlpha(baseColor, Math.max(0, 1 - t))
       }
-      return withAlpha(baseColor, Math.max(0, 1 - t))
-    }
-  }, [])
+    },
+    [colors.extreme, snapshot, signalColor, mapLayer, alertZones, fromSignalColor, base],
+  )
 
   const arcColor = useCallback(
     (obj: object) => {
-      const pair = getPairForArc(obj as StableArc)
-      const { mapLayer: layer, tolerance: tol, levelColor: lvlColor, colors: c, arcFrom: legFrom, fromSignalColor: fromColor, alertArcId: picked } = liveRef.current
-      if (!pair) return c.nodata
-      if ((obj as StableArc).id === picked) return c.extreme
-      const from = legFrom.get((obj as StableArc).id)
-      return layer === 'signal' ? (from ? fromColor(pair, from) : c.nodata) : lvlColor(levelFor(pair, tol))
+      const arc = obj as StableArc
+      const pair = getPairForArc(arc)
+      if (!pair) return colors.nodata
+      if (arc.id === alertArcId) return colors.extreme
+      if (mapLayer !== 'signal') return levelColor(levelFor(pair, tolerance))
+      const from = arcFrom.get(arc.id)
+      return from ? fromSignalColor(pair, from) : colors.nodata
     },
-    [getPairForArc],
+    [getPairForArc, mapLayer, levelColor, tolerance, colors.nodata, colors.extreme, alertArcId, arcFrom, fromSignalColor],
   )
 
   const arcStroke = useCallback(
     (obj: object) => {
-      // Your own route is drawn bolder than the rest
+      // The picked alert pair is boldest; your route and your currency's own pairs are bolder than the rest
       const arc = obj as StableArc
-      const { base: from, snapshot: snap, alertArcId: picked } = liveRef.current
-      if (arc.id === picked) return 1.4
-      const onRoute =
-        arc.base === from ||
-        arc.quote === from ||
-        routeLegs(snap, from, useAppStore.getState().quote).some((l) => l.pair.base === arc.base && l.pair.quote === arc.quote)
-      return onRoute ? 0.9 : 0.5
+      if (arc.id === alertArcId) return 1.4
+      return routeArcIds.has(arc.id) || arc.base === base || arc.quote === base ? 0.9 : 0.5
     },
-    [],
+    [alertArcId, routeArcIds, base],
   )
 
   const arcLabel = useCallback(
     (obj: object) => {
       const pair = getPairForArc(obj as StableArc)
       if (!pair) return ''
-      const { mapLayer: layer, tolerance: tol, arcFrom: legFrom, base: from } = liveRef.current
-      return arcTooltip(pair, layer, levelFor(pair, tol), legFrom.get((obj as StableArc).id) ?? from)
+      const arc = obj as StableArc
+      return arcTooltip(pair, mapLayer, levelFor(pair, tolerance), arcFrom.get(arc.id) ?? base)
     },
-    [getPairForArc],
+    [getPairForArc, mapLayer, tolerance, arcFrom, base],
   )
 
   /** Clicking a line points the app at that pair (its currency that isn't the "From" one) */
