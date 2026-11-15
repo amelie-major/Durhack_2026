@@ -47,6 +47,12 @@
     0%, 100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0.55); }
     50% { box-shadow: 0 0 0 6px rgb(239 68 68 / 0); }
   }
+  /* Convert card: the "You'd get" number glows briefly whenever it changes */
+  --animate-value-pop: value-pop 0.6s ease-out;
+  @keyframes value-pop {
+    from { text-shadow: 0 0 16px rgb(180 198 255 / 0.95); transform: translateY(-1px); }
+    to { text-shadow: 0 0 0 rgb(180 198 255 / 0); transform: none; }
+  }
   /* Tolerance switch: a brief accent flash on whatever just changed */
   --animate-flash: flash 0.9s ease-out;
   @keyframes flash {
