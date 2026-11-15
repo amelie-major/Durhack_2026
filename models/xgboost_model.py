@@ -147,13 +147,15 @@ def build_dataset(series: Dict[str, pd.DataFrame], target: str,
 # ==========================================================================
 
 def train(train_df: pd.DataFrame, val_df: pd.DataFrame, learning_rate: float = 0.05,
-          max_trees: int = 2000, patience: int = 50, n_jobs: int = -1) -> XGBRegressor:
+          max_trees: int = 2000, patience: int = 50, n_jobs: int = -1,
+          features: Optional[Sequence[str]] = None) -> XGBRegressor:
     """Fit on train, stopping when the validation error stops improving.
 
     To train for longer, lower `learning_rate` and raise `max_trees` and
     `patience` together: smaller steps need more trees to get to the same place.
-    `n_jobs=-1` uses every CPU core.
+    `n_jobs=-1` uses every CPU core. `features` defaults to FEATURES.
     """
+    features = list(features) if features is not None else FEATURES
     model = XGBRegressor(
         n_estimators=max_trees,
         learning_rate=learning_rate,
@@ -165,8 +167,8 @@ def train(train_df: pd.DataFrame, val_df: pd.DataFrame, learning_rate: float = 0
         early_stopping_rounds=patience,
         n_jobs=n_jobs,
     )
-    model.fit(train_df[FEATURES], train_df["y"],
-              eval_set=[(val_df[FEATURES], val_df["y"])], verbose=False)
+    model.fit(train_df[features], train_df["y"],
+              eval_set=[(val_df[features], val_df["y"])], verbose=False)
     return model
 
 

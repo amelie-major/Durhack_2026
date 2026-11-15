@@ -35,7 +35,7 @@ from tqdm import tqdm
 from loader import load_processed
 from models.xgboost_model import MAX_HORIZON
 
-from .config import PRESETS, RUN_DIR, Config
+from .config import PRESETS, RUN_DIR, Config, with_current_finetune_settings
 from .data import Bars, apply_mask, fit_tokenizer, make_mask, split_rows
 from .model import Pragma
 from .tokenizer import EVENT_KEYS, Tokenizer
@@ -95,6 +95,15 @@ def log_progress(step: int, total: int, every: int, recent: list, lr: float,
                    f"lr {lr:.2e}  grad norm {grad_norm:.2f}  {time.time() - started:.0f}s")
 
 
+def set_dropout(model: torch.nn.Module, p: float) -> None:
+    """Change every dropout rate in the model (the layers store it in two ways)."""
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.p = p
+        if isinstance(getattr(module, "dropout", None), float):
+            module.dropout = p
+
+
 def make_optimizer(model: Pragma, cfg: Config, lr: float) -> torch.optim.Optimizer:
     return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.weight_decay)
 
@@ -106,9 +115,11 @@ def save_checkpoint(path: str, model: Pragma, tokenizer: Tokenizer, cfg: Config)
 
 
 def load_checkpoint(path: str, device: torch.device):
-    """Returns (model, tokenizer, cfg) exactly as they were when saved."""
+    """Returns (model, tokenizer, cfg): the saved model, with today's fine-tuning settings."""
     state = torch.load(path, map_location=device, weights_only=True)
-    cfg = Config(**state["config"])
+    known = Config.__dataclass_fields__
+    cfg = with_current_finetune_settings(
+        Config(**{k: v for k, v in state["config"].items() if k in known}))
     tokenizer = Tokenizer.from_dict(state["tokenizer"])
     model = Pragma(cfg, tokenizer).to(device)
     model.load_state_dict(state["model"])
@@ -282,16 +293,38 @@ def finetune(args) -> None:
     def predict(ends: np.ndarray) -> np.ndarray:
         return run_in_chunks(model, bars, ends, cfg, device, model) * y_std + y_mean
 
-    optimizer = make_optimizer(model, cfg, cfg.finetune_lr)
+    # Gentle fine-tune (the full-size model overfits the small target sets):
+    # more dropout; the new head first learns alone on frozen layers (LP-FT), then
+    # the pre-trained layers move with a small learning rate, the head with a larger one.
+    set_dropout(model, cfg.finetune_dropout)
+    backbone = [p for n, p in model.named_parameters() if not n.startswith("regressor")]
+    head = list(model.regressor.parameters())
+    if args.from_scratch:  # random weights: no head-only phase, one learning rate
+        freeze, backbone_lr, head_lr = 0, cfg.finetune_scratch_lr, cfg.finetune_scratch_lr
+    else:
+        freeze, backbone_lr, head_lr = cfg.finetune_freeze_steps, cfg.finetune_lr, cfg.finetune_head_lr
+    optimizer = torch.optim.AdamW(
+        [{"params": backbone, "peak": backbone_lr, "start": freeze},
+         {"params": head, "peak": head_lr, "start": 0}],
+        lr=backbone_lr, weight_decay=cfg.finetune_weight_decay)
+    print(f"fine-tune: backbone lr {backbone_lr:g} (after {freeze} head-only steps)  "
+          f"head lr {head_lr:g}  dropout {cfg.finetune_dropout}  "
+          f"weight decay {cfg.finetune_weight_decay}  eval every {cfg.finetune_eval_every}")
     best_rmse, best_state, evals_since_best = float("inf"), None, 0
     if args.debug:
         torch.autograd.set_detect_anomaly(True)
     started, recent = time.time(), []
     bar = tqdm(range(cfg.finetune_steps), desc="finetune", unit="step", dynamic_ncols=True)
     for step in bar:
-        model.train()
+        frozen = step < freeze
+        for p in backbone:
+            p.requires_grad_(not frozen)
+        model.train(not frozen)  # head-only phase: embeddings without dropout
         for group in optimizer.param_groups:
-            group["lr"] = lr_at(step, cfg.finetune_steps, cfg.finetune_lr, cfg.warmup_steps)
+            s0 = group["start"]
+            group["lr"] = lr_at(step - s0, cfg.finetune_steps - s0, group["peak"],
+                                cfg.finetune_warmup_steps) if step >= s0 else 0.0
+        group = optimizer.param_groups[-1]  # head: shown in the progress line
         picks = rng.choice(len(train_ends), cfg.batch_size)
         batch = bars.batch(train_ends[picks], cfg.context, device)
         with autocast(device):
@@ -308,7 +341,7 @@ def finetune(args) -> None:
             tqdm.write(f"[debug] step {step + 1}: loss {recent[-1]:.4f}  grad norm "
                        f"{grad_norm:.3f}")
 
-        if (step + 1) % cfg.eval_every == 0 or step + 1 == cfg.finetune_steps:
+        if (step + 1) % cfg.finetune_eval_every == 0 or step + 1 == cfg.finetune_steps:
             val_rmse = rmse(val_y, predict(val_ends))
             train_rmse = y_std * math.sqrt(np.mean(recent))
             tqdm.write(f"step {step + 1:>6}/{cfg.finetune_steps}  train RMSE {train_rmse:.4f}  "
@@ -356,17 +389,21 @@ def probe(args) -> None:
         return run_in_chunks(model, bars, part["g"].to_numpy(), cfg, device, model.embedding)
 
     print(f"device={device}  embedding train={len(train):,} val={len(val):,} test={len(test):,}")
-    scaler = StandardScaler().fit(embed(train))
-    x_train, x_val = scaler.transform(embed(train)), scaler.transform(embed(val))
+    embedded_train = embed(train)
+    scaler = StandardScaler().fit(embedded_train)
+    x_train, x_val = scaler.transform(embedded_train), scaler.transform(embed(val))
 
     # Choose the ridge strength on validation, then predict the test set.
-    best_rmse, best_model = float("inf"), None
-    for alpha in (1.0, 10.0, 100.0, 1000.0, 10000.0):
+    best_rmse, best_model, best_alpha = float("inf"), None, None
+    alphas = (1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6, 1e7)
+    for alpha in alphas:
         linear = Ridge(alpha=alpha).fit(x_train, train["y"].to_numpy())
         val_rmse = rmse(val["y"].to_numpy(), linear.predict(x_val))
         print(f"  ridge alpha={alpha:<8g} val RMSE {val_rmse:.4f}")
         if val_rmse < best_rmse:
-            best_rmse, best_model = val_rmse, linear
+            best_rmse, best_model, best_alpha = val_rmse, linear, alpha
+    if best_alpha in (alphas[0], alphas[-1]):
+        print(f"  note: best alpha {best_alpha:g} is at the edge of the grid; widen it")
 
     test_pred = best_model.predict(scaler.transform(embed(test)))
     print(f"test RMSE {rmse(test['y'].to_numpy(), test_pred):.4f}")
