@@ -10,7 +10,7 @@
  * REPLAY: pass `replay = true` and the data is what it looked like AT `asOf` (nothing later),
  * so the app can play back through the last day. getReplayRange() says which day that is.
  */
-import type { CurrencyCode, PairHistory, ReplayRange, Snapshot } from '../types'
+import type { CurrencyCode, HybridPredictions, PairHistory, ReplayRange, Snapshot } from '../types'
 import { mockHistory, mockSnapshot } from './mock'
 import { liveHistory, liveReplayRange, liveSnapshot } from './yahoo'
 
@@ -75,4 +75,18 @@ export async function getHistory(pair: string, asOf: string, hours: number, repl
     }
   }
   return liveHistory(pair, hours, replay ? asOf : undefined)
+}
+
+/**
+ * BETA: the hybrid model's latest predictions (XGBoost + PRAGMA embeddings), or null when the
+ * model server isn't in use or doesn't answer. Refresh them with scripts/run_hybrid_beta.sh.
+ */
+export async function getHybridPredictions(signal?: AbortSignal): Promise<HybridPredictions | null> {
+  if (SOURCE !== 'model') return null
+  try {
+    return await fromServer<HybridPredictions>('/api/hybrid', signal)
+  } catch (err) {
+    if (!signal?.aborted) console.warn('[data] hybrid (beta) predictions unavailable:', err)
+    return null
+  }
 }

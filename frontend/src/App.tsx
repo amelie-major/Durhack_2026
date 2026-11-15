@@ -11,6 +11,7 @@ import StormLegend from './components/layout/StormLegend'
 import ProPanel from './components/pro/ProPanel'
 import ExtremeAlert from './components/layout/ExtremeAlert'
 import ReplayBar from './components/layout/ReplayBar'
+import HybridBetaCard from './components/beta/HybridBetaCard'
 import { getSnapshot } from './data/api'
 import { useAppStore } from './store/useAppStore'
 
@@ -99,8 +100,9 @@ export default function App() {
         </div>
       ) : (
         /* Top-right (mirrors the alert card on the left): tolerance + map key */
-        <div className="absolute top-17 right-3 hidden sm:block">
+        <div className="absolute top-17 right-3 hidden space-y-3 sm:block">
           <StormLegend />
+          <HybridBetaCard />
         </div>
       )}
     </div>
