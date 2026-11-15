@@ -16,9 +16,10 @@ Endpoints
 With ``asOf`` the server time-travels: it answers as it would have at that
 moment, using only bars at or before it (replay mode in the frontend).
 
-Yahoo gives spot mid OHLC only (no bid/ask, no forward points), so each pair's
-live 1M-forward bar is built from the live spot price plus that instrument's
-historical median spread and forward points. The features then go through the
+Every pair in data/processed is served. Yahoo gives spot mid OHLC only (no
+bid/ask, no forward points), so each pair's live bar is built from the live spot
+price plus the historical median spread and forward points of the instrument
+that pair's models use: its 1M forward, or spot for a spot-only pair. The features then go through the
 same code as training: loader.add_features -> models.xgboost_model.build_features.
 Because the live spread is that constant, the spread forecast mostly reflects
 time of day and recent volatility, not live quotes.
@@ -43,7 +44,7 @@ import pandas as pd
 from loader import add_features, load_processed
 from models.signal import (DIRECTION_FEATURES, build_direction_rows, direction_dataset,
                            signal_score, steady_signal, train_direction)
-from models.xgboost_model import FEATURES, VOL_TENOR, build_dataset, build_features, train
+from models.xgboost_model import FEATURES, build_dataset, build_features, train, vol_instruments
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "processed"
@@ -69,11 +70,10 @@ UA = "Mozilla/5.0 (fx-forecast-server)"
 
 def train_bank() -> dict:
     """Vol and spread models for every horizon, plus per-pair constants."""
-    series = forward_series()
+    series = all_series()
     consts = {}
-    for df in series.values():
-        if df.attrs["tenor"] != VOL_TENOR:
-            continue
+    for instrument_id in sorted(vol_instruments(series)):
+        df = series[instrument_id]
         consts[df.attrs["pair"]] = {
             "attrs": dict(df.attrs),
             "spread_bp": float(df["spread_bp"].median()),
@@ -89,12 +89,23 @@ def train_bank() -> dict:
             print(f"  {target:<6} h={h:>2}min  {models[target][h].best_iteration + 1:>4} trees"
                   f"  ({time.time() - t0:.0f}s)", flush=True)
     return {"horizons": HORIZONS, "models": models, "consts": consts, "pairs": sorted(consts),
-            "direction": train_direction_model(series)}
+            "features": list(FEATURES), "direction": train_direction_model(series)}
 
 
-def forward_series() -> Dict[str, pd.DataFrame]:
+def all_series() -> Dict[str, pd.DataFrame]:
+    """Every instrument in data/processed: forwards and spot."""
     series, _ = load_processed(str(DATA_DIR))
-    return {k: v for k, v in series.items() if v.attrs["product"] == "FORWARD"}
+    return series
+
+
+def data_pairs() -> List[str]:
+    """Pairs listed in data/processed/instruments.csv (what the cached models must cover)."""
+    return sorted(pd.read_csv(DATA_DIR / "instruments.csv")["pair"].unique())
+
+
+def bank_is_current(bank: dict) -> bool:
+    return (bank.get("horizons") == HORIZONS and bank.get("features") == list(FEATURES)
+            and bank.get("pairs") == data_pairs())
 
 
 def train_direction_model(series: Dict[str, pd.DataFrame]) -> dict:
@@ -112,13 +123,15 @@ def train_direction_model(series: Dict[str, pd.DataFrame]) -> dict:
 def load_bank(retrain: bool = False) -> dict:
     if CACHE.exists() and not retrain:
         bank = pickle.loads(CACHE.read_bytes())
-        if bank.get("horizons") == HORIZONS:
+        if bank_is_current(bank):
             print(f"loaded models from {CACHE}")
             if bank.get("direction", {}).get("horizon") != SIGNAL_HORIZON:
                 print("training the direction model for the Buy/Sell signal...", flush=True)
-                bank["direction"] = train_direction_model(forward_series())
+                bank["direction"] = train_direction_model(all_series())
                 CACHE.write_bytes(pickle.dumps(bank))
             return bank
+        else:
+            print("cached models don't match data/processed (pairs or features changed)", flush=True)
     print("training XGBoost models (one-off, cached afterwards)...", flush=True)
     bank = train_bank()
     CACHE.write_bytes(pickle.dumps(bank))
@@ -217,11 +230,10 @@ class Engine:
         c = self.bank["consts"][pair]
         spot, last_price = fetch_spot(pair)
         bars = live_bars(spot, c)
-        X = build_features(bars)
-        X["pair"] = pd.Categorical(X["pair"], categories=self.bank["pairs"])
-        X = X[FEATURES]
-        vol = {h: np.exp(m.predict(X)) for h, m in self.bank["models"]["vol"].items()}
-        spread = {h: np.exp(m.predict(X)) for h, m in self.bank["models"]["spread"].items()}
+        vol = {h: np.exp(m.predict(self._features(bars, "vol", h)))
+               for h, m in self.bank["models"]["vol"].items()}
+        spread = {h: np.exp(m.predict(self._features(bars, "spread", h)))
+                  for h, m in self.bank["models"]["spread"].items()}
         signal = self._signal(bars, vol, spread)
         ret2 = bars["ret_bp"].where(~bars["is_gap"], 0.0) ** 2
         past30 = np.sqrt(ret2.rolling(WINDOW, min_periods=WINDOW // 2).sum())  # t-29 … t
@@ -233,6 +245,12 @@ class Engine:
         with self.lock:
             self.cache[pair] = (time.time(), out)
         return out
+
+    def _features(self, bars: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
+        """Model inputs, built exactly as in training (some columns depend on target and horizon)."""
+        X = build_features(bars, target, horizon)
+        X["pair"] = pd.Categorical(X["pair"], categories=self.bank["pairs"])
+        return X[FEATURES]
 
     def _signal(self, bars: pd.DataFrame, vol: dict, spread: dict) -> Optional[dict]:
         """Buy/Sell/Hold on every row: the direction model's P(up) put through

@@ -1,6 +1,7 @@
 /**
  * Volatility level for each currency zone on the globe, against the "From" (home) currency.
- * All the data's pairs involve USD, so a zone's level comes from the USD/<zone> pair.
+ * A zone's level comes from its direct pair with the From currency (e.g. EURGBP) when the data has one,
+ * otherwise from the two legs through USD.
  */
 import type { CurrencyCode, PairSnapshot, Snapshot, StormLevel, Tolerance } from '../types'
 import { levelFor, worseLevel } from './storm'

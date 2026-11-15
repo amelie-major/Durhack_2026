@@ -40,7 +40,7 @@
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
   /* Rates ticker: the list is drawn twice and slides left by half its width, so it loops seamlessly */
-  --animate-ticker: ticker 45s linear infinite;
+  --animate-ticker: ticker 160s linear infinite; /* ~7.5 s per pair, 21 pairs */
   /* Extreme warning: a slow red glow pulse */
   --animate-alarm: alarm 1.6s ease-in-out infinite;
   @keyframes alarm {

@@ -1,7 +1,7 @@
 """Which instruments the XGBoost volatility model trains on."""
 import pandas as pd
 
-from models.xgboost_model import _vol_instruments
+from models.xgboost_model import vol_instruments
 
 
 def frame(pair: str, tenor: str) -> pd.DataFrame:
@@ -19,4 +19,4 @@ def test_vol_uses_1m_forward_or_spot_when_there_is_none():
         "USDJPY_SPOT": frame("USDJPY", "SPOT"),
         "GBPUSD_SPOT": frame("GBPUSD", "SPOT"),  # a Dukascopy pair: spot only
     }
-    assert _vol_instruments(series) == {"EURUSD_1M", "USDJPY_1M", "GBPUSD_SPOT"}
+    assert vol_instruments(series) == {"EURUSD_1M", "USDJPY_1M", "GBPUSD_SPOT"}

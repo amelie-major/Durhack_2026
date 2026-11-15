@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Globe, { type GlobeMethods } from 'react-globe.gl'
-import { SINGAPORE_MARKER, ZONES, ZONE_BY_COUNTRY, type CurrencyZone } from '../../data/currencies'
+import { POINT_MARKERS, ZONES, ZONE_BY_COUNTRY, type CurrencyZone, type PointMarker } from '../../data/currencies'
 import { countryCode, escapeHtml, type CountryFeature } from '../../lib/geo'
 import { usePrefersReducedMotion, useWindowSize } from '../../lib/hooks'
 import { slashPair } from '../../lib/pro'
@@ -32,8 +32,6 @@ const FLY_MS = 1200
 const SPIN_SPEED = 0.35
 const START_VIEW = { lat: 22, lng: 20, altitude: 2.4 }
 const FOCUS_ALTITUDE = 1.9
-
-type SingaporeMarker = typeof SINGAPORE_MARKER
 
 /** A line between the two countries of a pair */
 interface PairArc {
@@ -220,8 +218,6 @@ export default function FxGlobe() {
     return () => controller.abort()
   }, [])
 
-  const singaporeData = useMemo(() => [SINGAPORE_MARKER], [])
-
   // Pulsing rings (none when "reduce motion" is on):
   // volatility layer → on every "Extreme" zone; Buy / Sell layer → green/red at both ends of an active line
   const rings = useMemo<Ring[]>(() => {
@@ -388,14 +384,14 @@ export default function FxGlobe() {
 
   const handlePointClick = useCallback(
     (obj: object) => {
-      const m = obj as SingaporeMarker
+      const m = obj as PointMarker
       selectCountry({ code: m.code, name: m.name, zone: ZONE_BY_COUNTRY.get(m.code) ?? null }, { lat: m.lat, lng: m.lng })
     },
     [selectCountry],
   )
 
   const handlePointHover = useCallback((obj: object | null) => {
-    setHoveredCode(obj ? (obj as SingaporeMarker).code : null)
+    setHoveredCode(obj ? (obj as PointMarker).code : null)
   }, [])
 
   const handleGlobeReady = useCallback(() => {
@@ -426,14 +422,14 @@ export default function FxGlobe() {
         polygonsTransitionDuration={reducedMotion ? 0 : 250}
         onPolygonClick={handlePolygonClick}
         onPolygonHover={handlePolygonHover}
-        // Singapore (too small to be a polygon at this map scale)
-        pointsData={singaporeData}
+        // Singapore and Hong Kong (too small to be polygons at this map scale)
+        pointsData={POINT_MARKERS}
         pointLat="lat"
         pointLng="lng"
-        pointColor={() => zoneColor('SGP') ?? colors.nodata}
-        pointAltitude={(obj: object) => (isActive((obj as SingaporeMarker).code) ? 0.05 : 0.025)}
+        pointColor={(obj: object) => zoneColor((obj as PointMarker).code) ?? colors.nodata}
+        pointAltitude={(obj: object) => (isActive((obj as PointMarker).code) ? 0.05 : 0.025)}
         pointRadius={1.1}
-        pointLabel={(obj: object) => tooltipFor((obj as SingaporeMarker).name, 'SGP')}
+        pointLabel={(obj: object) => tooltipFor((obj as PointMarker).name, (obj as PointMarker).code)}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
         // Lines joining the two countries of each pair
