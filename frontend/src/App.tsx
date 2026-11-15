@@ -19,10 +19,11 @@ function useSnapshotLoader() {
   const asOf = useAppStore((s) => s.asOf)
   const base = useAppStore((s) => s.base)
   const replaying = useAppStore((s) => s.replay !== null)
+  const model = useAppStore((s) => s.model)
   const setSnapshot = useAppStore((s) => s.setSnapshot)
   useEffect(() => {
     let cancelled = false
-    getSnapshot(asOf, base, replaying)
+    getSnapshot(asOf, base, replaying, model)
       .then((snap) => {
         if (!cancelled) setSnapshot(snap)
       })
@@ -30,7 +31,7 @@ function useSnapshotLoader() {
     return () => {
       cancelled = true
     }
-  }, [asOf, base, replaying, setSnapshot])
+  }, [asOf, base, replaying, model, setSnapshot])
 }
 
 /** Live clock: every UPDATE_EVERY_MS the simulated "now" moves on 1 minute and everything refreshes */

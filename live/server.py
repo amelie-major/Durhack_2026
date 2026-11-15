@@ -6,12 +6,17 @@ Run from the repo root::
 
     python -m live.server            # http://localhost:8000
     python -m live.server --retrain  # rebuild the cached models first
+    python -m live.server --model pragma   # PRAGMA by default (see live/pragma_replay.py)
 
 Endpoints
-    GET /api/snapshot?base=USD[&asOf=2026-11-13T14:30:00Z]
-    GET /api/history?pair=USDJPY&hours=120[&asOf=...]
-    GET /api/replay-range
+    GET /api/snapshot?base=USD[&asOf=2026-11-13T14:30:00Z][&model=pragma]
+    GET /api/history?pair=USDJPY&hours=120[&asOf=...][&model=pragma]
+    GET /api/replay-range[?model=pragma]
     GET /api/health
+
+``model`` picks whose forecasts are served: ``xgboost`` (live Yahoo bars) or
+``pragma`` (saved predictions for the challenge data's test week, so always a
+replay). Without it the server's ``--model`` default is used.
 
 With ``asOf`` the server time-travels: it answers as it would have at that
 moment, using only bars at or before it (replay mode in the frontend).
@@ -40,6 +45,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pandas as pd
 
+from live import pragma_replay
 from loader import add_features, load_processed
 from models.signal import (DIRECTION_FEATURES, build_direction_rows, direction_dataset,
                            signal_score, steady_signal, train_direction)
@@ -48,6 +54,8 @@ from models.xgboost_model import FEATURES, VOL_TENOR, build_dataset, build_featu
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "processed"
 CACHE = ROOT / "data" / "live_forecast_models.pkl"
+PRAGMA_DIR = ROOT / "runs" / "pragma"
+MODELS = ("xgboost", "pragma")
 
 HORIZONS = [5, 10, 15, 20, 25, 30]  # minutes; must match frontend HORIZONS_MIN
 WINDOW = 30                          # realised-vol window (minutes)
@@ -203,8 +211,10 @@ def status_of(last_bar: pd.Timestamp, now: pd.Timestamp) -> str:
 
 
 class Engine:
-    def __init__(self, bank: dict):
+    def __init__(self, bank: dict, pragma: Optional[dict] = None, default_model: str = "xgboost"):
         self.bank = bank
+        self.pragma = pragma  # live.pragma_replay.load_pragma(), or None when not downloaded
+        self.default_model = default_model
         self.lock = threading.Lock()
         self.cache: Dict[str, tuple[float, dict]] = {}
 
@@ -268,8 +278,34 @@ class Engine:
             return 0.5
         return float(np.clip(np.searchsorted(sorted_hist, x) / len(sorted_hist), 0.01, 0.99))
 
-    def _get(self, pair: str, as_of: Optional[pd.Timestamp]) -> dict:
+    def _get(self, pair: str, as_of: Optional[pd.Timestamp], model: str = "xgboost") -> dict:
+        if model == "pragma":
+            return self.pragma["scored"][pair]
         return self.scored(pair, REPLAY_CACHE_SECONDS if as_of is not None else CACHE_SECONDS)
+
+    def models(self) -> List[str]:
+        return ["xgboost"] + (["pragma"] if self.pragma else [])
+
+    def pick_model(self, name: Optional[str]) -> str:
+        """The model a request asked for (or the default). ValueError -> HTTP 400."""
+        model = name or self.default_model
+        if model not in MODELS:
+            raise ValueError(f"unknown model {model!r}; choose from {', '.join(MODELS)}")
+        if model not in self.models():
+            raise ValueError(f"no PRAGMA predictions on this server; run: {pragma_replay.DOWNLOAD}")
+        return model
+
+    def _pairs(self, model: str) -> List[str]:
+        return self.pragma["pairs"] if model == "pragma" else self.bank["pairs"]
+
+    def _attrs(self, pair: str, model: str) -> dict:
+        return self.pragma["attrs"][pair] if model == "pragma" else self.bank["consts"][pair]["attrs"]
+
+    def _as_of(self, as_of: Optional[pd.Timestamp], model: str) -> Optional[pd.Timestamp]:
+        """PRAGMA has no live data: without asOf, "now" is the newest bar every pair has."""
+        if model != "pragma" or as_of is not None:
+            return as_of
+        return min(s["bars"]["timestamp"].iloc[-1] for s in self.pragma["scored"].values())
 
     @staticmethod
     def _row_at(ts: pd.Series, t: pd.Timestamp) -> int:
@@ -285,10 +321,11 @@ class Engine:
         v = s["vol"][HORIZONS[-1]][: k + 1]
         return np.sort(v[~np.isnan(v)])
 
-    def pair_snapshot(self, pair: str, now: pd.Timestamp, as_of: Optional[pd.Timestamp] = None) -> dict:
-        s = self._get(pair, as_of)
+    def pair_snapshot(self, pair: str, now: pd.Timestamp, as_of: Optional[pd.Timestamp] = None,
+                      model: str = "xgboost") -> dict:
+        s = self._get(pair, as_of, model)
         bars = s["bars"]
-        c = self.bank["consts"][pair]["attrs"]
+        c = self._attrs(pair, model)
         if as_of is None:
             i, mid, hist = len(bars) - 1, s["last_price"], s["hist30"]
         else:
@@ -315,28 +352,31 @@ class Engine:
             "signal": self._signal_at(s, i, status),
         }
 
-    def snapshot(self, base: str, as_of: Optional[pd.Timestamp] = None) -> dict:
+    def snapshot(self, base: str, as_of: Optional[pd.Timestamp] = None, model: str = "xgboost") -> dict:
+        as_of = self._as_of(as_of, model)
         now = as_of if as_of is not None else pd.Timestamp.now(tz="UTC")
         pairs, newest = [], None
-        for pair in self.bank["pairs"]:
+        for pair in self._pairs(model):
             try:
-                pairs.append(self.pair_snapshot(pair, now, as_of))
-                ts = self._get(pair, as_of)["bars"]["timestamp"]
+                pairs.append(self.pair_snapshot(pair, now, as_of, model))
+                ts = self._get(pair, as_of, model)["bars"]["timestamp"]
                 last = ts.iloc[-1] if as_of is None else ts.iloc[self._row_at(ts, as_of)]
                 newest = last if newest is None or last > newest else newest
             except Exception as e:  # one pair failing shouldn't blank the map
                 print(f"[snapshot] {pair}: {e}", flush=True)
         if not pairs:
             raise RuntimeError("no pairs could be scored")
-        return {"asOf": iso(now), "base": base, "lastUpdated": iso(newest), "pairs": pairs}
+        return {"asOf": iso(now), "base": base, "lastUpdated": iso(newest), "pairs": pairs,
+                "model": model}
 
     def history(self, pair: str, hours: float, step_min: int = 5,
-                as_of: Optional[pd.Timestamp] = None) -> Optional[dict]:
-        if pair not in self.bank["consts"]:
+                as_of: Optional[pd.Timestamp] = None, model: str = "xgboost") -> Optional[dict]:
+        if pair not in self._pairs(model):
             return None
-        s = self._get(pair, as_of)
+        as_of = self._as_of(as_of, model)
+        s = self._get(pair, as_of, model)
         bars = s["bars"]
-        c = self.bank["consts"][pair]["attrs"]
+        c = self._attrs(pair, model)
         h = HORIZONS[-1]
         ts = bars["timestamp"]
         now = as_of if as_of is not None else pd.Timestamp.now(tz="UTC")
@@ -365,14 +405,16 @@ class Engine:
                 "status": "rollover" if bool(bars["is_gap"].iloc[k]) else "live",
             })
         return {"pair": pair, "base": c["base"], "quote": c["quote"], "stepMin": step_min,
-                "horizonMin": h, "points": points}
+                "horizonMin": h, "points": points, "model": model}
 
-    def replay_range(self) -> dict:
+    def replay_range(self, model: str = "xgboost") -> dict:
         """The last REPLAY_HOURS of bars that every pair has: where replay starts and ends."""
         lasts = []
-        for pair in self.bank["pairs"]:
+        for pair in self._pairs(model):
             try:
-                lasts.append(last_busy_bar(self.scored(pair, REPLAY_CACHE_SECONDS)["bars"]["timestamp"]))
+                s = (self.pragma["scored"][pair] if model == "pragma"
+                     else self.scored(pair, REPLAY_CACHE_SECONDS))
+                lasts.append(last_busy_bar(s["bars"]["timestamp"]))
             except Exception as e:
                 print(f"[replay-range] {pair}: {e}", flush=True)
         if not lasts:
@@ -435,22 +477,25 @@ def make_handler(engine: Engine):
             url = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             try:
+                model = engine.pick_model(q.get("model"))
                 if url.path == "/api/health":
                     d = engine.bank.get("direction") or {}
                     self._send(200, {"ok": True, "pairs": engine.bank["pairs"], "horizons": HORIZONS,
+                                     "models": engine.models(), "defaultModel": engine.default_model,
+                                     "pragma": pragma_health(engine.pragma),
                                      "signal": {"horizonMin": d.get("horizon"), "testHitRate": d.get("test_hit_rate"),
                                                 "enter": SIGNAL_THRESHOLD, "exit": SIGNAL_EXIT}})
                 elif url.path == "/api/snapshot":
-                    self._send(200, engine.snapshot(q.get("base", "USD"), parse_as_of(q.get("asOf"))))
+                    self._send(200, engine.snapshot(q.get("base", "USD"), parse_as_of(q.get("asOf")), model))
                 elif url.path == "/api/history":
                     hist = engine.history(q.get("pair", ""), float(q.get("hours", 24)),
-                                          as_of=parse_as_of(q.get("asOf")))
+                                          as_of=parse_as_of(q.get("asOf")), model=model)
                     self._send(200 if hist else 404, hist or {"error": "unknown pair"})
                 elif url.path == "/api/replay-range":
-                    self._send(200, engine.replay_range())
+                    self._send(200, engine.replay_range(model))
                 else:
                     self._send(404, {"error": "not found"})
-            except ValueError as e:  # bad asOf / hours
+            except ValueError as e:  # bad asOf / hours / model
                 self._send(400, {"error": str(e)})
             except Exception as e:
                 print(f"[error] {url.path}: {e!r}", flush=True)
@@ -462,14 +507,37 @@ def make_handler(engine: Engine):
     return Handler
 
 
+def pragma_health(pragma: Optional[dict]) -> Optional[dict]:
+    """What the PRAGMA option covers, for /api/health (None when it is not loaded)."""
+    if not pragma:
+        return None
+    ts = [s["bars"]["timestamp"] for s in pragma["scored"].values()]
+    return {"pairs": pragma["pairs"], "variant": pragma["variant"],
+            "predictedHorizonMin": pragma["horizon"],
+            "start": iso(min(t.iloc[0] for t in ts)), "end": iso(min(t.iloc[-1] for t in ts)),
+            "note": "saved predictions, replay only; horizons under 30 min are scaled from the "
+                    "30-min forecast; no Buy/Sell signal"}
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--retrain", action="store_true", help="retrain instead of using the cache")
+    p.add_argument("--model", choices=MODELS, default="xgboost",
+                   help="forecasts served when a request has no ?model= (default: xgboost)")
+    p.add_argument("--pragma-dir", type=Path, default=PRAGMA_DIR,
+                   help="folder with PRAGMA's saved predictions (default: runs/pragma)")
     args = p.parse_args()
-    engine = Engine(load_bank(args.retrain))
+    pragma = None
+    if pragma_replay.available(args.pragma_dir):
+        pragma = pragma_replay.load_pragma(DATA_DIR, args.pragma_dir, HORIZONS, WINDOW)
+        print(f"loaded PRAGMA predictions for {', '.join(pragma['pairs'])} from {args.pragma_dir}")
+    elif args.model == "pragma":
+        p.error(f"no PRAGMA predictions in {args.pragma_dir}; run: {pragma_replay.DOWNLOAD}")
+    engine = Engine(load_bank(args.retrain), pragma, args.model)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(engine))
-    print(f"serving XGBoost forecasts on http://localhost:{args.port}/api/snapshot", flush=True)
+    print(f"serving {args.model} forecasts by default ({', '.join(engine.models())} available) "
+          f"on http://localhost:{args.port}/api/snapshot", flush=True)
     server.serve_forever()
     return 0
 

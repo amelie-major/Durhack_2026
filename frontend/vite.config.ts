@@ -10,7 +10,7 @@ const yahooProxy = {
     rewrite: (path: string) => path.replace(/^\/yahoo/, ''),
     headers: { 'User-Agent': 'Mozilla/5.0 (fx-forecast-frontend)' },
   },
-  // XGBoost forecast server: `python -m live.server` from the repo root
+  // Forecast server (XGBoost or PRAGMA): `python -m live.server` from the repo root
   '/api': { target: 'http://localhost:8000', changeOrigin: true },
 }
 

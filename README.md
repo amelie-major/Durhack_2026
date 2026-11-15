@@ -67,6 +67,29 @@ the models need its `vol_15` / `vol_60` columns.
 server answers `/api/snapshot` and `/api/history` with `&asOf=<time>` using only bars at or before that
 moment, so every number is what the model said then. Useful when the market is closed.
 
+### Choose the model: XGBoost or PRAGMA
+
+The site has an `XGBoost | PRAGMA` switch in the top bar. It appears once the server has PRAGMA's saved
+predictions, which are downloaded once from the release:
+
+```bash
+gh release download pragma-large-run1 -p '*_h30_scratch.parquet' -D runs/pragma
+python -m live.server                 # XGBoost by default, PRAGMA on the switch
+python -m live.server --model pragma  # start on PRAGMA instead
+```
+
+The API takes `&model=xgboost` or `&model=pragma` on `/api/snapshot`, `/api/history` and
+`/api/replay-range`; `/api/health` lists what is available.
+
+The server does not run PRAGMA: the model is too big for a laptop, and the release holds the pre-trained
+backbone, not a forecasting model. It serves the predictions PRAGMA made in its training run, so:
+
+- PRAGMA is a replay of the challenge data's test week (24-31 Aug 2026), not live prices. Choosing it
+  starts the replay; "Back to live" returns to XGBoost.
+- Only 30-minute forecasts were saved. Shorter horizons are derived from them (vol scaled by
+  sqrt(h / 30), spread kept the same).
+- There is no Buy / Sell signal in PRAGMA mode.
+
 ## Tests
 
 ```bash
